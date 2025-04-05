@@ -19,6 +19,12 @@ interface TranslationResponse {
 
 interface ToneResponse {
   tone: string;
+  tone_emoji?: string;
+  error?: string;
+}
+
+interface ActionItemsResponse {
+  actions: string[];
   error?: string;
 }
 
@@ -37,6 +43,15 @@ function App() {
   const [isTranslating, setIsTranslating] = useState(false);
   const [toneInfo, setToneInfo] = useState<any>('');
   const [isAnalyzingTone, setIsAnalyzingTone] = useState(false);
+  const [actionItems, setActionItems] = useState<string[]>([
+    'Summarize the key points discussed in the video',
+    'Extract all action items mentioned',
+    'Identify main speakers and their roles',
+    'List all technical terms used',
+    'Create a timeline of events discussed',
+    'Note any deadlines or important dates mentioned'
+  ]);
+  const [isLoadingActionItems, setIsLoadingActionItems] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const languages = [
@@ -56,15 +71,6 @@ function App() {
     'korean': 'ko',
     'chinese': 'zh'
   };
-
-  const actionItems = [
-    'Summarize the key points discussed in the video',
-    'Extract all action items mentioned',
-    'Identify main speakers and their roles',
-    'List all technical terms used',
-    'Create a timeline of events discussed',
-    'Note any deadlines or important dates mentioned'
-  ];
 
   const handleDrag = (e: React.DragEvent) => {
     e.preventDefault();
@@ -170,12 +176,75 @@ function App() {
         setError(data.error);
       } else if (data) {
         setToneInfo(data);
+        // After tone analysis, fetch action items
+        fetchActionItems(originalTranscript, data.tone);
       }
     } catch (err) {
       setError('Failed to analyze tone. Please try again.');
       console.error('Tone analysis error:', err);
     } finally {
       setIsAnalyzingTone(false);
+    }
+  };
+
+  // Function to fetch action items
+  const fetchActionItems = async (transcriptText: string, tone: string) => {
+    if (!transcriptText || !tone || isLoadingActionItems) return;
+    
+    setIsLoadingActionItems(true);
+    setError('');
+
+    try {
+      const response = await fetch('/api/action-items/', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          transcript: transcriptText,
+          tone: tone
+        }),
+      });
+
+      const data = await response.json();
+      
+      if (data.error) {
+        setError(data.error);
+      } else {
+        try {
+          // Parse the response - it might be a JSON string or already an object
+          let parsedData;
+          if (typeof data === 'string') {
+            try {
+              parsedData = JSON.parse(data);
+            } catch (parseErr) {
+              // If the string is not valid JSON, we'll handle it below
+              console.warn('Response is not valid JSON, treating as plain text');
+              parsedData = { actions: [data] }; // Treat the entire string as a single action item
+            }
+          } else {
+            parsedData = data;
+          }
+          
+          if (parsedData.actions && Array.isArray(parsedData.actions)) {
+            setActionItems(parsedData.actions);
+          } else if (parsedData.actions) {
+            setActionItems([parsedData.actions]);
+          } else {
+            // If we can't find an 'actions' property, try to display the data itself
+            console.warn('Response does not contain actions array', parsedData);
+            setActionItems(['No specific actions found. Please try again.']);
+          }
+        } catch (parseErr) {
+          console.error('Error processing action items:', parseErr);
+          setError('Failed to process action items response.');
+        }
+      }
+    } catch (err) {
+      setError('Failed to fetch action items. Please try again.');
+      console.error('Action items error:', err);
+    } finally {
+      setIsLoadingActionItems(false);
     }
   };
 
@@ -294,13 +363,20 @@ function App() {
           <div className="col-span-12 lg:col-span-5 space-y-6">
             {/* Actions to Take */}
             <div className="bg-white rounded-lg shadow-sm p-4">
-              <h3 className="font-medium mb-3">Actions to Take</h3>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-medium">Actions to Take</h3>
+                {isLoadingActionItems && <p className="text-sm text-purple-500">Loading...</p>}
+              </div>
               <div className="h-48 overflow-y-auto pr-2">
-                {actionItems.map((item, index) => (
-                  <div key={index} className="p-3 bg-gray-50 rounded mb-2">
-                    <p className="text-gray-600">{item}</p>
-                  </div>
-                ))}
+                {actionItems.length > 0 ? (
+                  actionItems.map((item, index) => (
+                    <div key={index} className="p-3 bg-gray-50 rounded mb-2">
+                      <p className="text-gray-600">{item}</p>
+                    </div>
+                  ))
+                ) : (
+                  <p className="text-gray-500 text-center p-4">No action items available.</p>
+                )}
               </div>
             </div>
 

@@ -1,0 +1,14 @@
+# Audio & transcript files
+*.mp3
+transcripts/
+
+# Python cache
+backend/__pycache__/
+backend/*.py[cod]
+
+# VSCode config
+.vscode/
+
+# Env & dependency
+.env
+.venv/
