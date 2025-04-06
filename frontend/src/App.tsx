@@ -789,18 +789,25 @@ function App() {
     <div className="min-h-screen bg-gradient-to-br from-purple-100 via-purple-50 to-white">
       <div className="container mx-auto px-4 py-12">
         <div className="max-w-3xl mx-auto">
-          <div className="text-center mb-12">
-            <h1 className="text-5xl font-bold bg-gradient-to-r from-purple-600 via-purple-500 to-indigo-600 bg-clip-text text-transparent">
-              Media Uploader
+          <div className="text-center mb-12 py-10">
+            <img 
+              src="/logo.png" 
+              alt="DeepMind AI Logo" 
+              className="w-20 mx-auto mb-4 drop-shadow-lg"
+            />
+            <h1 className="text-4xl font-bold text-center">
+              DeepMind AI
             </h1>
-            <p className="text-gray-600 mt-4 text-lg">
-              Upload your media files or paste a YouTube link
+            <p className="text-lg text-gray-500 mt-2 text-center">
+              Speak Freely. We'll Handle the Rest.
             </p>
           </div>
 
           <div 
             className={`
-              border-2 border-dashed rounded-xl p-8 mb-6 transition-all
+              border-2 border-dashed rounded-xl p-8 mb-6 transition-all duration-300 ease-in-out
+              shadow-lg hover:scale-105 hover:shadow-indigo-300 
+              bg-white/40 backdrop-blur-sm
               ${dragActive ? 'border-purple-500 bg-purple-50' : 'border-gray-300 bg-white'}
             `}
             onDragEnter={handleDrag}
@@ -809,7 +816,7 @@ function App() {
             onDrop={handleDrop}
           >
             <div className="text-center">
-              <Upload className="w-12 h-12 text-purple-500 mx-auto mb-4" />
+              <Upload className="w-16 h-16 text-indigo-500 mx-auto mb-4" />
               <p className="text-gray-600 mb-2">
                 Drag and drop your media files here, or{' '}
                 <button
@@ -858,25 +865,6 @@ function App() {
               </div>
             </div>
           )}
-
-          <div className="bg-white rounded-lg p-6 shadow-sm">
-            <div className="flex items-center mb-4">
-              <Youtube className="w-6 h-6 text-red-500 mr-2" />
-              <h3 className="font-medium">Or paste a YouTube link</h3>
-            </div>
-            <div className="flex space-x-3">
-              <div className="flex-1 relative">
-                <Link className="w-5 h-5 text-gray-400 absolute left-3 top-1/2 transform -translate-y-1/2" />
-                <input
-                  type="text"
-                  placeholder="https://youtube.com/watch?v=..."
-                  value={youtubeUrl}
-                  onChange={(e) => setYoutubeUrl(e.target.value)}
-                  className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
-                />
-              </div>
-            </div>
-          </div>
 
           {error && (
             <div className="bg-red-50 text-red-600 p-4 rounded-lg mt-4">
