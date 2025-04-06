@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Youtube, FileVideo, FileAudio, X, Link, Send, MessageSquare, Volume2, ChevronDown, RefreshCw, Download } from 'lucide-react';
+import { Upload, Youtube, FileVideo, FileAudio, X, Link, Send, MessageSquare, Volume2, ChevronDown, RefreshCw, Download, Calendar, ClipboardList, Mail } from 'lucide-react';
 
 interface AnalysisState {
   file?: File;
@@ -9,6 +9,10 @@ interface AnalysisState {
 
 interface TranscriptResponse {
   transcript?: string;
+  labeled_transcript?: {
+    speaker: string;
+    text: string;
+  }[];
   error?: string;
 }
 
@@ -38,6 +42,11 @@ interface ChatMessage {
   isUser: boolean;
 }
 
+interface TranscriptInput {
+  transcript_text: string;
+  filename?: string;
+}
+
 function App() {
   const [dragActive, setDragActive] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
@@ -48,6 +57,7 @@ function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [transcript, setTranscript] = useState<string>('');
   const [originalTranscript, setOriginalTranscript] = useState<string>('');
+  const [labeledTranscript, setLabeledTranscript] = useState<{speaker: string, text: string}[]>([]);
   const [error, setError] = useState<string>('');
   const [isTranslating, setIsTranslating] = useState(false);
   const [toneInfo, setToneInfo] = useState<any>('');
@@ -69,6 +79,10 @@ function App() {
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const [isDownloading, setIsDownloading] = useState(false);
+  const [isLabelingSpeakers, setIsLabelingSpeakers] = useState(false);
+  const [isCreatingJiraDeal, setIsCreatingJiraDeal] = useState(false);
+  const [showLanguagePopup, setShowLanguagePopup] = useState(false);
+  const [popupContent, setPopupContent] = useState('');
 
   useEffect(() => {
     if (chatEndRef.current) {
@@ -154,6 +168,8 @@ function App() {
         setError(data.error);
       } else if (data.translated_text) {
         setTranscript(data.translated_text);
+        setPopupContent(data.translated_text);
+        setShowLanguagePopup(true);
       }
     } catch (err) {
       setError('Failed to translate text. Please try again.');
@@ -183,7 +199,10 @@ function App() {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-        }
+        },
+        body: JSON.stringify({
+          transcript_text: originalTranscript
+        }),
       });
 
       const data: ToneResponse = await response.json();
@@ -259,6 +278,34 @@ function App() {
     }
   };
 
+  const formatTranscriptWithSpeakers = (transcriptText: string) => {
+    if (!transcriptText) return [];
+    
+    // Split the transcript by newlines
+    const lines = transcriptText.split('\n');
+    
+    // Parse each line into speaker and text
+    return lines
+      .filter(line => line.trim().length > 0) // Remove empty lines
+      .map(line => {
+        // Try to extract speaker and text (format: "Speaker: text")
+        const match = line.match(/^([^:]+):(.*)$/);
+        
+        if (match) {
+          return {
+            speaker: match[1].trim(),
+            text: match[2].trim()
+          };
+        } else {
+          // If line doesn't match the expected format, treat it as speaker-less text
+          return {
+            speaker: '',
+            text: line.trim()
+          };
+        }
+      });
+  };
+
   const handleSubmit = async () => {
     if (files.length === 0 && !youtubeUrl) {
       return;
@@ -287,8 +334,12 @@ function App() {
         } else if (data.transcript) {
           setOriginalTranscript(data.transcript);
           setTranscript(data.transcript);
-          setShowAnalysis(true);
           
+          // Parse the transcript text to extract speaker labels
+          const parsedTranscript = formatTranscriptWithSpeakers(data.transcript);
+          setLabeledTranscript(parsedTranscript);
+          
+          setShowAnalysis(true);
           await analyzeTone();
         }
       } catch (err) {
@@ -300,6 +351,38 @@ function App() {
     } else if (youtubeUrl) {
       setIsLoading(false);
       setShowAnalysis(true);
+    }
+  };
+
+  const assignSpeakers = async (transcriptText: string) => {
+    if (!transcriptText || isLabelingSpeakers) return;
+    
+    setIsLabelingSpeakers(true);
+    setError('');
+
+    try {
+      const response = await fetch('/api/assign_speakers_with_gpt/', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          transcript: transcriptText
+        }),
+      });
+
+      const data = await response.json();
+      
+      if (data.error) {
+        setError(data.error);
+      } else if (data.labeled_transcript && Array.isArray(data.labeled_transcript)) {
+        setLabeledTranscript(data.labeled_transcript);
+      }
+    } catch (err) {
+      console.error('Speaker labeling error:', err);
+      setError('Failed to assign speakers to transcript. Please try again.');
+    } finally {
+      setIsLabelingSpeakers(false);
     }
   };
 
@@ -357,15 +440,17 @@ function App() {
     setError('');
 
     try {
+      const payload: TranscriptInput = {
+        transcript_text: originalTranscript,
+        filename: 'meeting_minutes.pdf'
+      };
+      
       const response = await fetch('/api/download-report/', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({
-          transcript_text: originalTranscript,
-          filename: 'meeting_minutes.pdf'
-        }),
+        body: JSON.stringify(payload),
       });
       
       if (!response.ok) {
@@ -396,11 +481,78 @@ function App() {
     }
   };
 
+  const createJiraDeal = async () => {
+    if (!originalTranscript || isCreatingJiraDeal) return;
+    
+    setIsCreatingJiraDeal(true);
+    setError('');
+
+    try {
+      const payload: TranscriptInput = {
+        transcript_text: originalTranscript
+      };
+      
+      const response = await fetch('/api/jira-deal-creation/', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(payload),
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to create Jira deal');
+      }
+      
+      const data = await response.json();
+      alert('Jira deal created successfully!');
+      
+    } catch (err) {
+      setError('Failed to create Jira deal. Please try again.');
+      console.error('Jira deal creation error:', err);
+    } finally {
+      setIsCreatingJiraDeal(false);
+    }
+  };
+
+  // Popup modal component
+  const LanguagePopup = () => {
+    if (!showLanguagePopup) return null;
+    
+    return (
+      <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center p-4">
+        <div className="bg-white rounded-lg shadow-xl w-full max-w-3xl max-h-[80vh] flex flex-col">
+          <div className="p-4 border-b flex justify-between items-center">
+            <h3 className="font-medium text-lg">Translated Transcript in {languages.find(lang => lang.toLowerCase() === selectedLanguage)}</h3>
+            <button
+              onClick={() => setShowLanguagePopup(false)}
+              className="text-gray-400 hover:text-gray-600"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+          <div className="p-4 overflow-y-auto flex-grow">
+            <pre className="whitespace-pre-wrap text-gray-700">{popupContent}</pre>
+          </div>
+          <div className="p-4 border-t flex justify-end">
+            <button
+              onClick={() => setShowLanguagePopup(false)}
+              className="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   if (showAnalysis) {
     return (
-      <div className="min-h-screen bg-gray-50 p-6">
-        <div className="grid grid-cols-12 gap-6">
-          <div className="col-span-12 lg:col-span-7 space-y-6">
+      <div className="min-h-screen bg-gray-50 p-6 overflow-hidden">
+        <div className="grid grid-cols-12 gap-6 h-[calc(100vh-3rem)]">
+          <div className="col-span-12 lg:col-span-6 space-y-6 flex flex-col max-h-[calc(100vh-3rem)] overflow-hidden">
             <div className="bg-white rounded-lg shadow-sm p-4">
               {files.length > 0 ? (
                 <video 
@@ -415,56 +567,12 @@ function App() {
               )}
             </div>
 
-            <div className="bg-white rounded-lg shadow-sm p-4">
-              <div className="relative">
-                <select
-                  value={selectedLanguage}
-                  onChange={handleLanguageChange}
-                  className="w-full p-2 border border-gray-300 rounded-lg appearance-none pr-10 focus:outline-none focus:ring-2 focus:ring-purple-500"
-                  disabled={isTranslating}
-                >
-                  {languages.map((lang) => (
-                    <option key={lang.toLowerCase()} value={lang.toLowerCase()}>
-                      {lang}
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 pointer-events-none" />
-              </div>
-              {isTranslating && <p className="mt-2 text-sm text-purple-500">Translating...</p>}
-            </div>
-
-            <div className="bg-white rounded-lg shadow-sm p-4">
-              <h3 className="font-medium mb-3">Transcript</h3>
-              <div className="h-64 overflow-y-auto p-4 bg-gray-50 rounded">
-                {error ? (
-                  <p className="text-red-500">{error}</p>
-                ) : (
-                  <p className="text-gray-600">
-                    {transcript || 'No transcript available.'}
-                  </p>
-                )}
-              </div>
-              <div className="mt-3 flex justify-end">
-                <button
-                  onClick={downloadReport}
-                  disabled={isDownloading || !originalTranscript}
-                  className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg flex items-center space-x-2 disabled:bg-purple-300"
-                >
-                  <Download className="w-4 h-4" />
-                  <span>{isDownloading ? 'Downloading...' : 'Download Report'}</span>
-                </button>
-              </div>
-            </div>
-          </div>
-
-          <div className="col-span-12 lg:col-span-5 space-y-6">
-            <div className="bg-white rounded-lg shadow-sm p-4">
+            <div className="bg-white rounded-lg shadow-sm p-4 flex-grow overflow-auto">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="font-medium">Actions to Take</h3>
                 {isLoadingActionItems && <p className="text-sm text-purple-500">Loading...</p>}
               </div>
-              <div className="h-48 overflow-y-auto pr-2">
+              <div className="pr-2">
                 {actionItems.length > 0 ? (
                   actionItems.map((item, index) => (
                     <div key={index} className="p-3 bg-gray-50 rounded mb-2">
@@ -476,24 +584,138 @@ function App() {
                 )}
               </div>
             </div>
+          </div>
 
+          <div className="col-span-12 lg:col-span-6 space-y-6 flex flex-col max-h-[calc(100vh-3rem)] overflow-hidden">
+            <div className="bg-white rounded-lg shadow-sm p-4 flex flex-col">
+              <div className="p-4 bg-gray-50 rounded flex-grow overflow-hidden flex flex-col">
+                <div className="flex-grow overflow-y-auto mb-4 max-h-[50vh] scrollbar-thin scrollbar-thumb-gray-300 scrollbar-track-gray-100 pr-2">
+                  {error ? (
+                    <p className="text-red-500">{error}</p>
+                  ) : labeledTranscript.length > 0 ? (
+                    <div className="space-y-2">
+                      {labeledTranscript.map((segment, idx) => (
+                        <p key={idx} className="mb-2">
+                          {segment.speaker && (
+                            <span className="font-bold text-indigo-600">{segment.speaker}: </span>
+                          )}
+                          <span className="text-gray-600">{segment.text}</span>
+                        </p>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-gray-600">
+                      {transcript || 'No transcript available.'}
+                    </p>
+                  )}
+                  {isLabelingSpeakers && <p className="text-purple-500 mt-4">Identifying speakers...</p>}
+                </div>
+                
+                <div className="relative mt-auto pt-3 border-t border-gray-200">
+                  <div className="flex items-center justify-between mb-1">
+                    <h3 className="text-sm font-medium text-gray-500">Choose language of transcript</h3>
+                    {isTranslating && <p className="text-xs text-purple-500">Translating...</p>}
+                  </div>
+                  <div className="relative mt-1">
+                    <div className="flex space-x-2">
+                      <div className="flex-grow">
+                        <select
+                          value={selectedLanguage}
+                          onChange={handleLanguageChange}
+                          className="w-full p-2 border border-gray-300 rounded-lg appearance-none pr-10 focus:outline-none focus:ring-2 focus:ring-purple-500"
+                          disabled={isTranslating}
+                        >
+                          {languages.map((lang) => (
+                            <option key={lang.toLowerCase()} value={lang.toLowerCase()}>
+                              {lang}
+                            </option>
+                          ))}
+                        </select>
+                        <ChevronDown className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 pointer-events-none" />
+                      </div>
+                      <button
+                        onClick={() => setShowLanguagePopup(true)}
+                        disabled={!transcript || isTranslating}
+                        className="px-3 py-2 bg-indigo-600 text-white text-sm rounded hover:bg-indigo-700 disabled:bg-indigo-300 flex items-center"
+                      >
+                        <span>View Translation</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            
             <div className="bg-white rounded-lg shadow-sm p-4">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="font-medium">Speaker Tone</h3>
+              <div className="flex items-center justify-between mb-2">
                 <button 
                   onClick={analyzeTone}
                   disabled={isAnalyzingTone || !originalTranscript}
-                  className="text-purple-500 hover:text-purple-700 disabled:text-gray-300"
+                  className="ml-auto text-purple-500 hover:text-purple-700 disabled:text-gray-300"
                   title="Refresh tone analysis"
                 >
                   <RefreshCw className={`w-4 h-4 ${isAnalyzingTone ? 'animate-spin' : ''}`} />
                 </button>
               </div>
-              <div className="flex items-center space-x-3 mb-2">
-                <Volume2 className="w-5 h-5 text-purple-500" />
-                <span className="text-gray-700 font-medium">
-                  {isAnalyzingTone ? 'Analyzing...' : (`${toneInfo.tone} ${toneInfo.tone_emoji}` || 'Not analyzed')}
-                </span>
+              <div className="flex items-center">
+                {isAnalyzingTone ? (
+                  <p className="text-gray-700 text-xl">Analyzing tone...</p>
+                ) : toneInfo.tone ? (
+                  <div className="flex items-center w-full">
+                    <p className="text-xl font-medium text-gray-700 mr-2">
+                      Tone Detected to be
+                    </p>
+                    <div className="flex items-center">
+                      <span className="inline-block px-2 py-1 text-sm bg-indigo-100 text-indigo-800 rounded-full font-medium uppercase">
+                        {toneInfo.tone}
+                      </span>
+                      <span className="text-2xl ml-2">{toneInfo.tone_emoji}</span>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-gray-400 italic text-lg">No tone detected yet</p>
+                )}
+              </div>
+            </div>
+            
+            <div className="bg-white rounded-lg shadow-sm p-4">
+              <h3 className="font-medium mb-3">Actions</h3>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  onClick={downloadReport}
+                  disabled={isDownloading || !originalTranscript}
+                  className="bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded-lg flex items-center justify-center space-x-2 disabled:bg-purple-300 text-sm"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>{isDownloading ? 'Downloading...' : 'Download Report'}</span>
+                </button>
+                
+                <button
+                  onClick={() => {}}
+                  disabled={!originalTranscript}
+                  className="bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded-lg flex items-center justify-center space-x-2 disabled:bg-purple-300 text-sm"
+                >
+                  <Calendar className="w-4 h-4" />
+                  <span>Add to Calendar</span>
+                </button>
+                
+                <button
+                  onClick={createJiraDeal}
+                  disabled={isCreatingJiraDeal || !originalTranscript}
+                  className="bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded-lg flex items-center justify-center space-x-2 disabled:bg-purple-300 text-sm"
+                >
+                  <ClipboardList className="w-4 h-4" />
+                  <span>{isCreatingJiraDeal ? 'Creating...' : 'Add deal to Jira'}</span>
+                </button>
+                
+                <button
+                  onClick={() => {}}
+                  disabled={!originalTranscript}
+                  className="bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded-lg flex items-center justify-center space-x-2 disabled:bg-purple-300 text-sm"
+                >
+                  <Mail className="w-4 h-4" />
+                  <span>Create MOM email</span>
+                </button>
               </div>
             </div>
           </div>
@@ -501,13 +723,13 @@ function App() {
 
         <button
           onClick={() => setShowChat(!showChat)}
-          className="fixed bottom-6 right-6 p-4 bg-purple-500 text-white rounded-full shadow-lg hover:bg-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2"
+          className="fixed bottom-6 right-6 p-4 bg-indigo-600 text-white rounded-full shadow-lg hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2"
         >
           <MessageSquare className="w-6 h-6" />
         </button>
 
         {showChat && (
-          <div className="fixed right-0 top-0 h-full w-96 bg-white shadow-lg transform transition-transform duration-300 ease-in-out">
+          <div className="fixed right-0 top-0 h-full w-96 bg-white shadow-lg transform transition-transform duration-300 ease-in-out flex flex-col">
             <div className="p-4 border-b">
               <div className="flex justify-between items-center">
                 <h3 className="font-medium">Ask about the transcript</h3>
@@ -519,7 +741,7 @@ function App() {
                 </button>
               </div>
             </div>
-            <div className="p-4 h-[calc(100%-8rem)] overflow-y-auto">
+            <div className="p-4 flex-grow overflow-y-auto">
               <div className="space-y-4">
                 {chatMessages.map((msg, idx) => (
                   <div 
@@ -536,7 +758,7 @@ function App() {
                 <div ref={chatEndRef} />
               </div>
             </div>
-            <div className="p-4 border-t">
+            <div className="p-4 border-t mt-auto">
               <form onSubmit={handleChatSubmit} className="flex space-x-2">
                 <input
                   type="text"
@@ -549,7 +771,7 @@ function App() {
                 <button 
                   type="submit"
                   disabled={isSendingChat}
-                  className="p-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 disabled:bg-purple-300"
+                  className="p-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:bg-indigo-300"
                 >
                   <Send className="w-5 h-5" />
                 </button>
@@ -557,6 +779,8 @@ function App() {
             </div>
           </div>
         )}
+
+        <LanguagePopup />
       </div>
     );
   }

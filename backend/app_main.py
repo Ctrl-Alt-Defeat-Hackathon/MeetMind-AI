@@ -17,8 +17,20 @@ import configparser
 from fpdf import FPDF
 from fastapi.responses import FileResponse
 
+from datetime import datetime
+from icalendar import Calendar, Event, vCalAddress, vText
+from fastapi.responses import StreamingResponse
+import io
 
+from jira import JIRA
 
+# Jira server URL
+jira_server = 'https://aathirai1234.atlassian.net'
+
+# Authentication using email and PAT
+jira_options = {'server': jira_server}
+jira = JIRA(options=jira_options, basic_auth=('aathirai1234@gmail.com', "<REDACTED_JIRA_TOKEN>" # Replace with your actual auth key (base64 encoded string)
+))
 # Read config file from parent directory
 config = configparser.ConfigParser()
 config_path = os.path.join(os.path.dirname(__file__), '..', 'secret.config')
@@ -74,6 +86,52 @@ class TranscriptInput(BaseModel):
     transcript_text: str
     filename: str = "meeting_minutes.pdf"
 
+# Add this Pydantic model with your other models
+class CalendarEventRequest(BaseModel):
+    transcript: str = ""
+
+
+
+def assign_speakers_with_gpt(transcript_text, model="gpt-4"):
+    prompt = f"""
+You are given a transcript of a two-speaker conversation. Your task is to:
+
+1.⁠ ⁠Identify when each speaker is talking.
+2.⁠ ⁠If speaker names are clearly mentioned (e.g., "Hi John", "Thanks, Sarah"), use those names for labeling.
+3.⁠ ⁠If names are not clearly identifiable, label the speakers as "Speaker 1" and "Speaker 2".
+4.⁠ ⁠Format the conversation as a dialogue, with each speaker's turn on a new line and prefixed by their label, like:
+
+Speaker 1: Hello! I just wanted to check in on the status of the project.
+Speaker 2: Sure! We're almost done, just a few final touches left.
+
+Avoid long blocks of text; keep each speaker's turn distinct and readable.
+
+Transcript:
+\"\"\"
+{transcript_text}
+\"\"\"
+
+Now return the labeled transcript:
+"""
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant that formats transcripts."},
+            {"role": "user", "content": prompt}
+        ],
+        temperature=0.3
+    )
+
+    labeled_transcript = response.choices[0].message.content.strip()
+
+    # Normalize line endings
+    normalized_transcript = "\n".join(
+        [line.strip() for line in labeled_transcript.splitlines() if line.strip()]
+    )
+
+    return normalized_transcript
+
 
 
 @app.post("/transcribe-audio/")
@@ -85,9 +143,6 @@ async def transcribe_audio(file: UploadFile = File(...), language_code: str = "e
             status_code=400,
             detail=f"Unsupported file format: {ext}. Supported formats: {', '.join(SUPPORTED_FILE_FORMATS)}"
         )
-
-    print(f"📁 Uploaded file: {file.filename}")
-    print(f"🔍 File extension: {ext}")
 
     try:
         # Save the uploaded file to a temp file
@@ -104,8 +159,14 @@ async def transcribe_audio(file: UploadFile = File(...), language_code: str = "e
                 language=language_code if language_code != "en" else None
             )
 
-        print("transcription", transcription.text.strip())
-        return {"transcript": transcription.text.strip()}
+        transcript_text = transcription.text.strip()
+        labeled_transcript = assign_speakers_with_gpt(transcript_text)
+        # Save the transcript to the specified path
+        with open(TRANSCRIPT_PATH, "w", encoding="utf-8") as f:
+            f.write(transcript_text)
+
+        print("transcription", labeled_transcript)
+        return {"transcript": labeled_transcript}
 
     except Exception as e:
         return {"error": f"Error during transcription: {str(e)}"}
@@ -114,7 +175,6 @@ async def transcribe_audio(file: UploadFile = File(...), language_code: str = "e
         # Clean up the temporary file
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
-
 
 
 
@@ -140,6 +200,8 @@ async def translate_transcript(input_data: TranslationInput):
         raise HTTPException(status_code=500, detail=f"Translation error: {str(e)}")
 
     # Step 3: Return translated text
+
+    print("translation", translation)
     return {"translated_text": translation.strip()}
 
 
@@ -147,7 +209,7 @@ async def translate_transcript(input_data: TranslationInput):
 
 
 @app.post("/analyze-tone/")
-async def analyze_tone():
+async def analyze_tone(payload: TranscriptInput = None):
     tone_emoji_mapping = {
         "confident": "💪",
         "enthusiastic": "😃",
@@ -158,14 +220,20 @@ async def analyze_tone():
         "empathetic": "💖"
     }
 
-    if not os.path.exists(TRANSCRIPT_PATH):
-        raise HTTPException(status_code=404, detail="Transcript file not found.")
+    # Try to get transcript from request body first
+    transcript_text = None
+    if payload and payload.transcript_text:
+        transcript_text = payload.transcript_text
+    # Fallback to file if no transcript provided in request
+    else:
+        if not os.path.exists(TRANSCRIPT_PATH):
+            raise HTTPException(status_code=404, detail="Transcript file not found.")
 
-    try:
-        with open(TRANSCRIPT_PATH, "r", encoding="utf-8") as f:
-            transcript_text = f.read()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error reading transcript file: {str(e)}")
+        try:
+            with open(TRANSCRIPT_PATH, "r", encoding="utf-8") as f:
+                transcript_text = f.read()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Error reading transcript file: {str(e)}")
 
     prompt = f"""
     You are an expert in sales communication analysis.
@@ -204,6 +272,78 @@ async def analyze_tone():
         "tone_emoji": tone_emoji
     }
 
+
+
+def create_jira_issue(issue_dict,transition):
+  issue = jira.create_issue(fields=issue_dict)
+  print(f"✅ Created: {issue.key}")
+
+  # Step 2: Get available transitions from current state
+  transitions = jira.transitions(issue)
+
+  # Debug print to see available transitions
+  print("\n🔁 Available transitions:")
+  for t in transitions:
+      print(f"- {t['name']} (ID: {t['id']})")
+
+  # Step 3: Find and apply the "Contract Sent" transition
+  contract_sent_id = next((t['id'] for t in transitions if t['name'].lower() == transition), None)
+
+  if contract_sent_id:
+      jira.transition_issue(issue, contract_sent_id)
+      print(f"🚀 {issue.key} moved to {transition}")
+  else:
+      print("❌ 'Contract Sent' transition not available. Check workflow or status.")
+
+
+prompt_template_jira = PromptTemplate(
+    input_variables=["transcript", "transition_names"],
+    template="""
+You are an expert in analyzing sales call transcripts and extracting deal-related information.
+Given the transcript below, extract the following details:
+
+- Deal Name
+- Key discussion points from the meeting
+
+These are the available transition names:
+["new",
+    "follow-up",
+    "contract sent",
+    "negotiation",
+    "closed won",
+    "closed lost"]
+
+Provide the extracted details as a JSON object in this format:
+{{
+    "project": {{
+        "key": "HAC"  # The project key (can be replaced based on project)
+    }},
+    "summary": "Deal Name",  # The summary or title of the deal
+    "description": "Brief discussion about the meeting",  # Key points from the meeting
+    "issuetype": {{
+        "id": "10001"  # The ID for your issue type (e.g., 'Customer')
+    }},
+    "transition_name": "Choose one of the transition names available"  # Transition stage like 'contractsent'
+}}
+
+Transcript:
+{transcript}
+"""
+)
+
+@app.post("/jira-deal-creation/")
+async def jira_deal_creatition(payload: TranscriptInput):
+    transcript_text = payload.transcript_text
+
+    llm_chain_jira = LLMChain(llm=llm, prompt=prompt_template_jira, verbose=True)
+    extracted_details = llm_chain_jira.run({"transcript": transcript_text})
+
+    new_deal = json.loads(extracted_details)
+    deal_details = {key: value for key, value in new_deal.items() if key != 'transition_name'}
+    transition_name = new_deal['transition_name']
+
+    output = create_jira_issue(deal_details, transition_name)
+    return output
 
 
 
@@ -322,12 +462,6 @@ async def chatbot(input_data: QuestionInput):
         raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
 
 
-
-
-
-
-
-
 # Define the combined prompt template for the meeting data extraction
 combined_prompt_template11 = PromptTemplate(
     input_variables=["transcript"],
@@ -357,26 +491,33 @@ combined_chain = LLMChain(prompt=combined_prompt_template11, llm=llm)
 def extract_meeting_data(transcript_text):
     result = combined_chain.run({"transcript": transcript_text})
 
-    # Process the result to organize the data into appropriate sections
     meeting_data = {
-        "meeting_title": "", 
+        "meeting_title": "",
         "agenda_items": [],
         "summary": "",
         "action_items": []
     }
 
-    # Parse result (assuming the output will have the sections we need)
-    sections = result.split("\n")
-    for section in sections:
-        if section.startswith("1. **Meeting Title**:"):
-            meeting_data["meeting_title"] = section.replace("1. **Meeting Title**:", "").strip()
-        elif section.startswith("2. **Agenda Items**:"):
-            meeting_data["agenda_items"] = section.replace("2. **Agenda Items**:", "").strip().split("\n")
-        elif section.startswith("3. **Summary**:"):
-            meeting_data["summary"] = section.replace("3. **Summary**:", "").strip()
-        elif section.startswith("4. **Action Items**:"):
-            meeting_data["action_items"] = section.replace("4. **Action Items**:", "").strip().split("\n")
-    
+    # Use regex to extract each section
+    title_match = re.search(r"\*\*Meeting Title\*\*:\s*(.*)", result)
+    agenda_match = re.search(r"\*\*Agenda Items\*\*:\s*((?:- .*\n?)+)", result)
+    summary_match = re.search(r"\*\*Summary\*\*:\s*((?:.|\n)*?)(?=\*\*Action Items\*\*|$)", result)
+    action_match = re.search(r"\*\*Action Items\*\*:\s*((?:- .*\n?)+)", result)
+
+    if title_match:
+        meeting_data["meeting_title"] = title_match.group(1).strip()
+
+    if agenda_match:
+        agenda_items = [item.strip("- ").strip() for item in agenda_match.group(1).strip().split("\n") if item.strip()]
+        meeting_data["agenda_items"] = agenda_items
+
+    if summary_match:
+        meeting_data["summary"] = summary_match.group(1).strip()
+
+    if action_match:
+        action_items = [item.strip("- ").strip() for item in action_match.group(1).strip().split("\n") if item.strip()]
+        meeting_data["action_items"] = action_items
+
     return meeting_data
 
 
@@ -459,32 +600,135 @@ async def write_meeting_pdf_from_transcript(payload: TranscriptInput):    # Extr
 
 
 
-@app.post("/transcript-to-mom-email/")
-async def transcript_to_mom_email(transcript_text: str):
-    response = client.chat.completions.create(
-        model="gpt-4o-mini",
-        max_tokens=500,
-        messages=[
-            {
-                "role": "system",
-                "content": "You are a helpful assistant who turns raw meeting transcripts into formal Minutes of Meeting (MoM) email templates. The email should include attendees, agenda, key points, action items, and next steps. Keep it professional and under 150 words."
-            },
-            {
-                "role": "user",
-                "content": f"Here is the meeting transcript:\n\n{transcript_text}"
+
+# Add this endpoint to your app
+@app.post("/download-calendar/")
+async def download_calendar(input_data: CalendarEventRequest):
+    """Generate and download calendar file directly from transcript"""
+    try:
+        # Get transcript from request or from file if empty
+        transcript_text = input_data.transcript
+
+        if not transcript_text:
+            # Try to get transcript from the file (using your existing pattern)
+            if not os.path.exists(TRANSCRIPT_PATH):
+                raise HTTPException(status_code=404, detail="Transcript file not found.")
+
+            try:
+                with open(TRANSCRIPT_PATH, "r", encoding="utf-8") as f:
+                    transcript_text = f.read()
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Error reading transcript file: {str(e)}")
+
+        # Extract events using GPT
+        prompt = f"""
+        Extract any scheduled events mentioned in the transcript:
+
+        {transcript_text}
+
+        Format your response as a JSON array of events with these fields:
+        - title: Event title
+        - date: YYYY-MM-DD
+        - start_time: HH:MM (24-hour)
+        - end_time: HH:MM (24-hour)
+        - description: Brief description
+        - attendees: Comma-separated list of people
+
+        If no events are found, return an empty array.
+        """
+
+        chat_completion = client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an assistant that extracts calendar events from transcripts into structured data."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            model="gpt-4o-mini",
+            max_tokens=800
+        )
+
+        response_text = chat_completion.choices[0].message.content.strip()
+
+        # Handle JSON extraction from response
+        events = []
+        try:
+            # Clean up response if it contains markdown or explanations
+            if "```json" in response_text:
+                match = re.search(r'```(?:json)?(.*?)```', response_text, re.DOTALL)
+                if match:
+                    response_text = match.group(1).strip()
+            events = json.loads(response_text)
+        except json.JSONDecodeError:
+            # Create a default event if parsing fails
+            today = datetime.today().strftime('%Y-%m-%d')
+            events = [{
+                "title": "Meeting Follow-up",
+                "date": today,
+                "start_time": "09:00",
+                "end_time": "10:00",
+                "description": "Follow-up to meeting discussion",
+                "attendees": "Meeting participants"
+            }]
+
+        # Generate ICS file
+        cal = Calendar()
+        cal.add('prodid', '-//Meeting Event Extractor//EN//')
+        cal.add('version', '2.0')
+
+        for event_data in events:
+            event = Event()
+            event.add('summary', event_data.get('title', 'Untitled Event'))
+
+            date_str = event_data.get('date', datetime.today().strftime('%Y-%m-%d'))
+            start_time_str = event_data.get('start_time', '09:00')
+            end_time_str = event_data.get('end_time', '10:00')
+
+            try:
+                start_dt = datetime.strptime(f"{date_str} {start_time_str}", "%Y-%m-%d %H:%M")
+                end_dt = datetime.strptime(f"{date_str} {end_time_str}", "%Y-%m-%d %H:%M")
+            except ValueError:
+                today = datetime.today().strftime('%Y-%m-%d')
+                start_dt = datetime.strptime(f"{today} 09:00", "%Y-%m-%d %H:%M")
+                end_dt = datetime.strptime(f"{today} 10:00", "%Y-%m-%d %H:%M")
+
+            event.add('dtstart', start_dt)
+            event.add('dtend', end_dt)
+            event.add('description', event_data.get('description', 'No description provided'))
+
+            # Add attendees
+            attendees = event_data.get('attendees', '')
+            attendee_list = []
+
+            if isinstance(attendees, list):
+                attendee_list = attendees
+            elif isinstance(attendees, str) and attendees:
+                attendee_list = [att.strip() for att in attendees.split(',') if att.strip()]
+
+            for attendee in attendee_list:
+                if attendee:
+                    attendee_addr = vCalAddress(f'MAILTO:{str(attendee).replace(" ", "").lower()}@example.com')
+                    attendee_addr.params['cn'] = vText(str(attendee))
+                    event.add('attendee', attendee_addr, encode=0)
+
+            cal.add_component(event)
+
+        # Create a file-like object for the ICS
+        ics_data = cal.to_ical()
+        ics_file = io.BytesIO(ics_data)
+
+        # Return as a downloadable file
+        return StreamingResponse(
+            iter([ics_file.getvalue()]),
+            media_type="text/calendar",
+            headers={
+                "Content-Disposition": "attachment; filename=meeting_events.ics"
             }
-        ]
-    )
-    # return response.choices[0].message.content
+        )
 
-    return {
-            "to": "recipient@example.com",  # Optional: let frontend/user customize this
-            "subject": "Minutes of Meeting",
-            "body": response.choices[0].message.content
-        }
-
-
-
-
-
-
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error creating calendar: {str(e)}")
