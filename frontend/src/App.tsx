@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Youtube, FileVideo, FileAudio, X, Link, Send, MessageSquare, Volume2, ChevronDown, RefreshCw } from 'lucide-react';
+import { Upload, Youtube, FileVideo, FileAudio, X, Link, Send, MessageSquare, Volume2, ChevronDown, RefreshCw, Download } from 'lucide-react';
 
 interface AnalysisState {
   file?: File;
@@ -69,6 +69,7 @@ function App() {
   const [isSendingChat, setIsSendingChat] = useState(false);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const [isDownloading, setIsDownloading] = useState(false);
 
   useEffect(() => {
     if (chatEndRef.current) {
@@ -357,6 +358,52 @@ function App() {
     sendChatMessage();
   };
 
+  const downloadReport = async () => {
+    if (!originalTranscript || isDownloading) return;
+    
+    setIsDownloading(true);
+    setError('');
+
+    try {
+      const response = await fetch('/api/download-report/', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          transcript_text: originalTranscript,
+          filename: 'meeting_minutes.pdf'
+        }),
+      });
+      
+      if (!response.ok) {
+        throw new Error('Failed to download report');
+      }
+      
+      // Get the blob from the response
+      const blob = await response.blob();
+      // Create a URL for the blob
+      const url = window.URL.createObjectURL(blob);
+      // Create a temporary anchor element
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'meeting_minutes.pdf';
+      // Append the anchor to the document
+      document.body.appendChild(a);
+      // Programmatically click the anchor to trigger the download
+      a.click();
+      // Clean up
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      
+    } catch (err) {
+      setError('Failed to download report. Please try again.');
+      console.error('Download error:', err);
+    } finally {
+      setIsDownloading(false);
+    }
+  };
+
   if (showAnalysis) {
     return (
       <div className="min-h-screen bg-gray-50 p-6">
@@ -405,6 +452,16 @@ function App() {
                     {transcript || 'No transcript available.'}
                   </p>
                 )}
+              </div>
+              <div className="mt-3 flex justify-end">
+                <button
+                  onClick={downloadReport}
+                  disabled={isDownloading || !originalTranscript}
+                  className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2 rounded-lg flex items-center space-x-2 disabled:bg-purple-300"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>{isDownloading ? 'Downloading...' : 'Download Report'}</span>
+                </button>
               </div>
             </div>
           </div>

@@ -14,6 +14,8 @@ import os
 import tempfile
 from io import BytesIO
 import configparser
+from fpdf import FPDF
+from fastapi.responses import FileResponse
 
 
 
@@ -68,7 +70,9 @@ class ActionItemsInput(BaseModel):
 class QuestionInput(BaseModel):
     question: str
 
-
+class TranscriptInput(BaseModel):
+    transcript_text: str
+    filename: str = "meeting_minutes.pdf"
 
 
 
@@ -316,4 +320,144 @@ async def chatbot(input_data: QuestionInput):
         return {"answer": answer}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
+
+
+
+
+
+
+
+
+# Define the combined prompt template for the meeting data extraction
+combined_prompt_template11 = PromptTemplate(
+    input_variables=["transcript"],
+    template="""
+    You are an expert in summarizing business meetings. Based on the following meeting transcript, provide the following:
+
+    1. **Meeting Title**: Determine the main title or subject of the meeting. The title should succinctly describe the overall purpose of the meeting.
+
+    2. **Agenda Items**: Extract the key agenda items discussed during the meeting. Provide them in a bulleted list, ensuring that the items are clearly defined.
+
+    3. **Summary**: Generate a structured summary covering:
+       - Meeting Objective
+       - Key Discussion Points
+       Provide the summary in clearly labeled sections using bullet points where appropriate.
+
+    4. **Action Items**: Extract all action items discussed or assigned during the meeting. List each action item in bullet points and include the person responsible if mentioned.
+
+    Transcript:
+    {transcript}
+    """
+)
+
+# Create a single chain using the combined prompt
+combined_chain = LLMChain(prompt=combined_prompt_template11, llm=llm)
+
+# Function to extract meeting data from transcript
+def extract_meeting_data(transcript_text):
+    result = combined_chain.run({"transcript": transcript_text})
+
+    # Process the result to organize the data into appropriate sections
+    meeting_data = {
+        "meeting_title": "", 
+        "agenda_items": [],
+        "summary": "",
+        "action_items": []
+    }
+
+    # Parse result (assuming the output will have the sections we need)
+    sections = result.split("\n")
+    for section in sections:
+        if section.startswith("1. **Meeting Title**:"):
+            meeting_data["meeting_title"] = section.replace("1. **Meeting Title**:", "").strip()
+        elif section.startswith("2. **Agenda Items**:"):
+            meeting_data["agenda_items"] = section.replace("2. **Agenda Items**:", "").strip().split("\n")
+        elif section.startswith("3. **Summary**:"):
+            meeting_data["summary"] = section.replace("3. **Summary**:", "").strip()
+        elif section.startswith("4. **Action Items**:"):
+            meeting_data["action_items"] = section.replace("4. **Action Items**:", "").strip().split("\n")
+    
+    return meeting_data
+
+
+class MeetingPDF(FPDF):
+    def header(self):
+        self.set_font("Arial", "B", 14)
+        self.set_text_color(0, 0, 0)  # Black text color
+        self.cell(0, 10, "Minutes of Meeting", ln=True, align="C")
+        self.ln(6)
+
+    def section_title(self, title):
+        self.set_font("Arial", "B", 12)
+        self.set_text_color(0, 0, 0)  # Black text color
+        self.cell(0, 8, title, ln=True, align="L")
+        self.ln(2)
+
+    def section_body(self, body, line_height=6):
+        self.set_font("Arial", "", 11)
+        self.set_text_color(0, 0, 0)  # Black text color
+        self.multi_cell(0, line_height, body)
+        self.ln(1)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font("Arial", "I", 10)
+        self.set_text_color(128, 128, 128)  # Gray text color for footer
+        self.cell(0, 10, f"Prepared by: Meet Mind AI", 0, 0, "C")
+
+
+
+
+@app.post("/download-report/")
+async def write_meeting_pdf_from_transcript(payload: TranscriptInput):    # Extract data using GPT model
+    meeting_data = extract_meeting_data(payload.transcript_text)
+
+    # Extract individual fields from the result
+    meeting_title = meeting_data["meeting_title"]
+    agenda_items = meeting_data["agenda_items"]
+    summary = meeting_data["summary"]
+    action_items = meeting_data["action_items"]
+
+    # Create the PDF from the extracted meeting data
+    pdf = MeetingPDF()
+    pdf.set_auto_page_break(auto=True, margin=15)
+    pdf.add_page()
+
+    # Date and Title
+    pdf.set_font("Arial", "", 11)
+    pdf.set_text_color(0, 0, 0)  # Black text color for date and title
+    pdf.cell(0, 8, f"Meeting Title: {meeting_title}", ln=True)
+    pdf.ln(5)
+
+    # Agenda Section
+    pdf.section_title("Agenda")
+    for i, item in enumerate(agenda_items, 1):
+        pdf.section_body(f"{i}. {item}", line_height=6)
+
+    # Summary Section
+    pdf.section_title("Summary")
+    pdf.section_body(summary.strip(), line_height=6)
+
+    # Action Items Section
+    pdf.section_title("Action Items")
+    if action_items:
+        for i, action in enumerate(action_items, 1):
+            pdf.section_body(f"{i}. {action}", line_height=6)
+    else:
+        pdf.section_body("No specific action items recorded.", line_height=6)
+
+    # Save the PDF
+    pdf.output(payload.filename)
+    print(f"✅ Meeting PDF saved as: {payload.filename}")
+    # return {"message": f"Meeting PDF saved as: {payload.filename}"}
+
+    return FileResponse(
+    path=payload.filename,
+    filename=payload.filename,
+    media_type='application/pdf'
+)
+
+
+
+
 
