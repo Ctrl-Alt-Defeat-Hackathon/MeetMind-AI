@@ -45,7 +45,6 @@ function App() {
   const [showAnalysis, setShowAnalysis] = useState(false);
   const [showChat, setShowChat] = useState(false);
   const [selectedLanguage, setSelectedLanguage] = useState('english');
-  const [email, setEmail] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [transcript, setTranscript] = useState<string>('');
   const [originalTranscript, setOriginalTranscript] = useState<string>('');
@@ -304,13 +303,6 @@ function App() {
     }
   };
 
-  const handleSendEmail = () => {
-    if (email) {
-      console.log('Sending email to:', email);
-      setEmail('');
-    }
-  };
-
   const sendChatMessage = async () => {
     if (!chatInput.trim() || isSendingChat) return;
     
@@ -502,27 +494,6 @@ function App() {
                 <span className="text-gray-700 font-medium">
                   {isAnalyzingTone ? 'Analyzing...' : (`${toneInfo.tone} ${toneInfo.tone_emoji}` || 'Not analyzed')}
                 </span>
-              </div>
-            </div>
-
-            <div className="bg-white rounded-lg shadow-sm p-4">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="font-medium">Email</h3>
-              </div>
-              <div className="flex space-x-2">
-                <input
-                  type="email"
-                  placeholder="Enter your email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="flex-1 p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
-                />
-                <button
-                  onClick={handleSendEmail}
-                  className="p-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2"
-                >
-                  <Send className="w-5 h-5" />
-                </button>
               </div>
             </div>
           </div>

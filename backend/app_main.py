@@ -459,5 +459,32 @@ async def write_meeting_pdf_from_transcript(payload: TranscriptInput):    # Extr
 
 
 
+@app.post("/transcript-to-mom-email/")
+async def transcript_to_mom_email(transcript_text: str):
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        max_tokens=500,
+        messages=[
+            {
+                "role": "system",
+                "content": "You are a helpful assistant who turns raw meeting transcripts into formal Minutes of Meeting (MoM) email templates. The email should include attendees, agenda, key points, action items, and next steps. Keep it professional and under 150 words."
+            },
+            {
+                "role": "user",
+                "content": f"Here is the meeting transcript:\n\n{transcript_text}"
+            }
+        ]
+    )
+    # return response.choices[0].message.content
+
+    return {
+            "to": "recipient@example.com",  # Optional: let frontend/user customize this
+            "subject": "Minutes of Meeting",
+            "body": response.choices[0].message.content
+        }
+
+
+
+
 
 
