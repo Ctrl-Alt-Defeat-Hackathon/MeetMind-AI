@@ -28,6 +28,16 @@ interface ActionItemsResponse {
   error?: string;
 }
 
+interface ChatbotResponse {
+  answer?: string;
+  error?: string;
+}
+
+interface ChatMessage {
+  text: string;
+  isUser: boolean;
+}
+
 function App() {
   const [dragActive, setDragActive] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
@@ -52,7 +62,19 @@ function App() {
     'Note any deadlines or important dates mentioned'
   ]);
   const [isLoadingActionItems, setIsLoadingActionItems] = useState(false);
+  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([
+    { text: 'How can I help you with the video analysis?', isUser: false }
+  ]);
+  const [chatInput, setChatInput] = useState('');
+  const [isSendingChat, setIsSendingChat] = useState(false);
+  const chatEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [chatMessages]);
 
   const languages = [
     'English', 'Spanish', 'French', 'German', 'Italian', 
@@ -109,9 +131,7 @@ function App() {
     setFiles(prev => prev.filter((_, i) => i !== index));
   };
 
-  // Function to translate text when language changes
   const translateTranscript = async (language: string) => {
-    // Don't translate if there's no transcript or we're already translating
     if (!originalTranscript || isTranslating) return;
     
     setIsTranslating(true);
@@ -143,20 +163,16 @@ function App() {
     }
   };
 
-  // Handle language change
   const handleLanguageChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const newLanguage = e.target.value;
     setSelectedLanguage(newLanguage);
     
-    // If we're in analysis mode and have a transcript, translate it
     if (showAnalysis && originalTranscript) {
       translateTranscript(newLanguage);
     }
   };
 
-  // Function to analyze tone
   const analyzeTone = async () => {
-    // Don't analyze if there's no transcript or we're already analyzing
     if (!originalTranscript || isAnalyzingTone) return;
     
     setIsAnalyzingTone(true);
@@ -176,7 +192,6 @@ function App() {
         setError(data.error);
       } else if (data) {
         setToneInfo(data);
-        // After tone analysis, fetch action items
         fetchActionItems(originalTranscript, data.tone);
       }
     } catch (err) {
@@ -187,7 +202,6 @@ function App() {
     }
   };
 
-  // Function to fetch action items
   const fetchActionItems = async (transcriptText: string, tone: string) => {
     if (!transcriptText || !tone || isLoadingActionItems) return;
     
@@ -212,15 +226,13 @@ function App() {
         setError(data.error);
       } else {
         try {
-          // Parse the response - it might be a JSON string or already an object
           let parsedData;
           if (typeof data === 'string') {
             try {
               parsedData = JSON.parse(data);
             } catch (parseErr) {
-              // If the string is not valid JSON, we'll handle it below
               console.warn('Response is not valid JSON, treating as plain text');
-              parsedData = { actions: [data] }; // Treat the entire string as a single action item
+              parsedData = { actions: [data] };
             }
           } else {
             parsedData = data;
@@ -231,7 +243,6 @@ function App() {
           } else if (parsedData.actions) {
             setActionItems([parsedData.actions]);
           } else {
-            // If we can't find an 'actions' property, try to display the data itself
             console.warn('Response does not contain actions array', parsedData);
             setActionItems(['No specific actions found. Please try again.']);
           }
@@ -261,10 +272,8 @@ function App() {
         const formData = new FormData();
         formData.append('file', files[0]);
         
-        // Get the language code from the selected language
         const languageCode = languageCodeMap[selectedLanguage] || 'en';
         
-        // Append the language code to the form data
         formData.append('language_code', languageCode);
 
         const response = await fetch('/api/transcribe-audio/', {
@@ -276,11 +285,10 @@ function App() {
         if (data.error) {
           setError(data.error);
         } else if (data.transcript) {
-          setOriginalTranscript(data.transcript); // Store the original transcript
+          setOriginalTranscript(data.transcript);
           setTranscript(data.transcript);
           setShowAnalysis(true);
           
-          // Analyze tone after successful transcription
           await analyzeTone();
         }
       } catch (err) {
@@ -290,7 +298,6 @@ function App() {
         setIsLoading(false);
       }
     } else if (youtubeUrl) {
-      // Handle YouTube URL (would need a different endpoint)
       setIsLoading(false);
       setShowAnalysis(true);
     }
@@ -303,13 +310,58 @@ function App() {
     }
   };
 
+  const sendChatMessage = async () => {
+    if (!chatInput.trim() || isSendingChat) return;
+    
+    const question = chatInput.trim();
+    setChatInput('');
+    setIsSendingChat(true);
+    
+    setChatMessages(prev => [...prev, { text: question, isUser: true }]);
+    
+    try {
+      const response = await fetch('/api/chatbot', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          question: question
+        }),
+      });
+
+      const data: ChatbotResponse = await response.json();
+      
+      let messageText = 'Sorry, I couldn\'t process your question. Please try again.';
+      
+      if (data.error) {
+        messageText = `Error: ${data.error || 'An unknown error occurred'}`;
+      } else if (data.answer) {
+        messageText = data.answer;
+      }
+      
+      setChatMessages(prev => [...prev, { text: messageText, isUser: false }]);
+    } catch (err) {
+      console.error('Chatbot error:', err);
+      setChatMessages(prev => [...prev, { 
+        text: 'Failed to connect to the chatbot service. Please try again later.', 
+        isUser: false 
+      }]);
+    } finally {
+      setIsSendingChat(false);
+    }
+  };
+
+  const handleChatSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    sendChatMessage();
+  };
+
   if (showAnalysis) {
     return (
       <div className="min-h-screen bg-gray-50 p-6">
         <div className="grid grid-cols-12 gap-6">
-          {/* Left Column */}
           <div className="col-span-12 lg:col-span-7 space-y-6">
-            {/* Video Player */}
             <div className="bg-white rounded-lg shadow-sm p-4">
               {files.length > 0 ? (
                 <video 
@@ -324,7 +376,6 @@ function App() {
               )}
             </div>
 
-            {/* Language Selector */}
             <div className="bg-white rounded-lg shadow-sm p-4">
               <div className="relative">
                 <select
@@ -344,7 +395,6 @@ function App() {
               {isTranslating && <p className="mt-2 text-sm text-purple-500">Translating...</p>}
             </div>
 
-            {/* Transcript */}
             <div className="bg-white rounded-lg shadow-sm p-4">
               <h3 className="font-medium mb-3">Transcript</h3>
               <div className="h-64 overflow-y-auto p-4 bg-gray-50 rounded">
@@ -359,9 +409,7 @@ function App() {
             </div>
           </div>
 
-          {/* Right Column */}
           <div className="col-span-12 lg:col-span-5 space-y-6">
-            {/* Actions to Take */}
             <div className="bg-white rounded-lg shadow-sm p-4">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="font-medium">Actions to Take</h3>
@@ -380,26 +428,6 @@ function App() {
               </div>
             </div>
 
-            {/* Email Input */}
-            <div className="bg-white rounded-lg shadow-sm p-4">
-              <div className="flex space-x-2">
-                <input
-                  type="email"
-                  placeholder="Enter your email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  className="flex-1 p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
-                />
-                <button
-                  onClick={handleSendEmail}
-                  className="p-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2"
-                >
-                  <Send className="w-5 h-5" />
-                </button>
-              </div>
-            </div>
-
-            {/* Speaker Tone */}
             <div className="bg-white rounded-lg shadow-sm p-4">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="font-medium">Speaker Tone</h3>
@@ -419,10 +447,30 @@ function App() {
                 </span>
               </div>
             </div>
+
+            <div className="bg-white rounded-lg shadow-sm p-4">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-medium">Email</h3>
+              </div>
+              <div className="flex space-x-2">
+                <input
+                  type="email"
+                  placeholder="Enter your email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="flex-1 p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
+                />
+                <button
+                  onClick={handleSendEmail}
+                  className="p-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2"
+                >
+                  <Send className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
           </div>
         </div>
 
-        {/* Chat Button */}
         <button
           onClick={() => setShowChat(!showChat)}
           className="fixed bottom-6 right-6 p-4 bg-purple-500 text-white rounded-full shadow-lg hover:bg-purple-600 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:ring-offset-2"
@@ -430,12 +478,11 @@ function App() {
           <MessageSquare className="w-6 h-6" />
         </button>
 
-        {/* Chat Panel */}
         {showChat && (
           <div className="fixed right-0 top-0 h-full w-96 bg-white shadow-lg transform transition-transform duration-300 ease-in-out">
             <div className="p-4 border-b">
               <div className="flex justify-between items-center">
-                <h3 className="font-medium">Chat</h3>
+                <h3 className="font-medium">Ask about the transcript</h3>
                 <button
                   onClick={() => setShowChat(false)}
                   className="text-gray-400 hover:text-gray-600"
@@ -445,24 +492,40 @@ function App() {
               </div>
             </div>
             <div className="p-4 h-[calc(100%-8rem)] overflow-y-auto">
-              {/* Chat messages would go here */}
               <div className="space-y-4">
-                <div className="bg-gray-100 p-3 rounded-lg">
-                  <p className="text-gray-600">How can I help you with the video analysis?</p>
-                </div>
+                {chatMessages.map((msg, idx) => (
+                  <div 
+                    key={idx} 
+                    className={`p-3 rounded-lg ${
+                      msg.isUser 
+                        ? 'bg-purple-100 ml-6' 
+                        : 'bg-gray-100 mr-6'
+                    }`}
+                  >
+                    <p className="text-gray-600">{msg.text}</p>
+                  </div>
+                ))}
+                <div ref={chatEndRef} />
               </div>
             </div>
             <div className="p-4 border-t">
-              <div className="flex space-x-2">
+              <form onSubmit={handleChatSubmit} className="flex space-x-2">
                 <input
                   type="text"
-                  placeholder="Type your message..."
+                  placeholder="Ask about the transcript..."
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  disabled={isSendingChat}
                   className="flex-1 p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500"
                 />
-                <button className="p-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600">
+                <button 
+                  type="submit"
+                  disabled={isSendingChat}
+                  className="p-2 bg-purple-500 text-white rounded-lg hover:bg-purple-600 disabled:bg-purple-300"
+                >
                   <Send className="w-5 h-5" />
                 </button>
-              </div>
+              </form>
             </div>
           </div>
         )}
@@ -474,7 +537,6 @@ function App() {
     <div className="min-h-screen bg-gradient-to-br from-purple-100 via-purple-50 to-white">
       <div className="container mx-auto px-4 py-12">
         <div className="max-w-3xl mx-auto">
-          {/* Header */}
           <div className="text-center mb-12">
             <h1 className="text-5xl font-bold bg-gradient-to-r from-purple-600 via-purple-500 to-indigo-600 bg-clip-text text-transparent">
               Media Uploader
@@ -484,7 +546,6 @@ function App() {
             </p>
           </div>
 
-          {/* Upload Area */}
           <div 
             className={`
               border-2 border-dashed rounded-xl p-8 mb-6 transition-all
@@ -520,7 +581,6 @@ function App() {
             </div>
           </div>
 
-          {/* File List */}
           {files.length > 0 && (
             <div className="bg-white rounded-lg p-4 mb-6 shadow-sm">
               <h3 className="font-medium mb-3">Selected Files:</h3>
@@ -547,7 +607,6 @@ function App() {
             </div>
           )}
 
-          {/* YouTube Link Input */}
           <div className="bg-white rounded-lg p-6 shadow-sm">
             <div className="flex items-center mb-4">
               <Youtube className="w-6 h-6 text-red-500 mr-2" />
@@ -567,14 +626,12 @@ function App() {
             </div>
           </div>
 
-          {/* Error Message */}
           {error && (
             <div className="bg-red-50 text-red-600 p-4 rounded-lg mt-4">
               {error}
             </div>
           )}
 
-          {/* Submit Button */}
           <button
             onClick={handleSubmit}
             disabled={isLoading}

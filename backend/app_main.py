@@ -17,9 +17,10 @@ import configparser
 
 
 
-# Read config file
+# Read config file from parent directory
 config = configparser.ConfigParser()
-config.read("secret.config")
+config_path = os.path.join(os.path.dirname(__file__), '..', 'secret.config')
+config.read(config_path)
 
 # Get secrets
 try:
@@ -33,7 +34,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 SUPPORTED_FILE_FORMATS = {".mp3", ".mp4", ".wav"}
 
 # Initialize LLM (ChatGPT for extracting deal info and tone analysis)
-llm = ChatOpenAI(model_name="gpt-4", temperature=0)
+llm = ChatOpenAI(model_name="gpt-4", temperature=0, openai_api_key=OPENAI_API_KEY)
 
 # FastAPI app initialization
 app = FastAPI()
@@ -53,7 +54,9 @@ lang_map = {
     "zh": "Chinese", "ta": "Tamil", "te": "Telugu", "ja": "Japanese"
 }
 
-TRANSCRIPT_PATH = os.path.join("transcripts", "data.text")
+# TRANSCRIPT_PATH = os.path.join("transcripts", "data.text")
+TRANSCRIPT_PATH = os.path.join("data.text")
+# TRANSCRIPT_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'transcripts', 'data.txt'))
 
 class TranslationInput(BaseModel):
     language: str
@@ -61,6 +64,9 @@ class TranslationInput(BaseModel):
 class ActionItemsInput(BaseModel):
     transcript: str = ""
     tone: str = "neutral"
+
+class QuestionInput(BaseModel):
+    question: str
 
 
 
@@ -274,3 +280,40 @@ async def generate_action_items(input_data: ActionItemsInput):
                 return {"actions": actions if actions else [action_text]}
     except Exception as e:
         return {"error": f"Error generating action items: {str(e)}"}
+
+
+
+
+
+# Function to allow continuous questioning based on the predefined transcript
+@app.post("/chatbot")
+async def chatbot(input_data: QuestionInput):
+    # Ensure transcript exists
+    print("input_data", TRANSCRIPT_PATH)
+    if not os.path.exists(TRANSCRIPT_PATH):
+        raise HTTPException(status_code=404, detail="Transcript file not found.")
+
+    try:
+        with open(TRANSCRIPT_PATH, "r", encoding="utf-8") as f:
+            transcript_text = f.read()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading transcript: {str(e)}")
+    
+    print("transcript_text", transcript_text)
+
+    chatbot_messages = [
+        {"role": "system", "content": "You are an assistant. Answer questions only based on the transcript provided."},
+        {"role": "user", "content": f"Here is the transcript: {transcript_text}"},
+        {"role": "user", "content": input_data.question}
+    ]
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4",
+            messages=chatbot_messages
+        )
+        answer = response.choices[0].message.content
+        return {"answer": answer}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
+
