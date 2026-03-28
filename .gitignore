@@ -15,3 +15,6 @@ backend/*.py[cod]
 
 # Config file
 secret.config
+
+# Local tooling (git history rewrite venv)
+.venv-filter/
