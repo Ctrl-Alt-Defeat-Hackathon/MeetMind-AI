@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+python-multipart
+pydantic
+requests
+configparser
+fpdf2
+icalendar
+jira
+langchain
+langchain-community
+groq
+langchain-groq
+deepgram-sdk

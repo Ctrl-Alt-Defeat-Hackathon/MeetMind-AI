@@ -12,6 +12,7 @@ backend/*.py[cod]
 # Env & dependency
 .env
 .venv/
+backend/.venv/
 
 # Config file
 secret.config

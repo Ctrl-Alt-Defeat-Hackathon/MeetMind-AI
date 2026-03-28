@@ -152,13 +152,14 @@ function App() {
     setError('');
 
     try {
+      const languageName = languages.find(l => l.toLowerCase() === language) || language;
       const response = await fetch('/api/translate-text/', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          language: languageCodeMap[language] || 'en'
+          language: languageName
         }),
       });
 
@@ -634,11 +635,11 @@ function App() {
                         <ChevronDown className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 pointer-events-none" />
                       </div>
                       <button
-                        onClick={() => setShowLanguagePopup(true)}
-                        disabled={!transcript || isTranslating}
+                        onClick={() => translateTranscript(selectedLanguage)}
+                        disabled={!originalTranscript || isTranslating}
                         className="px-3 py-2 bg-indigo-600 text-white text-sm rounded hover:bg-indigo-700 disabled:bg-indigo-300 flex items-center"
                       >
-                        <span>View Translation</span>
+                        <span>{isTranslating ? 'Translating...' : 'Translate'}</span>
                       </button>
                     </div>
                   </div>

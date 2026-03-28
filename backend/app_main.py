@@ -1,21 +1,26 @@
 import os
-from openai import OpenAI
-import openai
+from typing import Dict, List
 from pydantic import BaseModel, validator, ValidationError
 import re
 import os
 import json
 from fastapi import FastAPI, File, UploadFile, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from langchain.chat_models import ChatOpenAI
-from langchain.prompts import PromptTemplate
-from langchain.chains import LLMChain
 import os
 import tempfile
 from io import BytesIO
 import configparser
 from fpdf import FPDF
 from fastapi.responses import FileResponse
+import requests
+
+# LangChain is optional; Ollama-only mode does not need it.
+try:
+    from langchain.prompts import PromptTemplate  # type: ignore
+    from langchain.chains import LLMChain  # type: ignore
+except Exception:
+    PromptTemplate = None  # type: ignore
+    LLMChain = None  # type: ignore
 
 from datetime import datetime
 from icalendar import Calendar, Event, vCalAddress, vText
@@ -29,26 +34,70 @@ config = configparser.ConfigParser()
 config_path = os.path.join(os.path.dirname(__file__), '..', 'secret.config')
 config.read(config_path)
 
-# Get secrets
+# Get secrets (HubSpot/Jira optional for local dev)
 try:
-    OPENAI_API_KEY = config["secrets"]["OPENAI_API_KEY"]
-    HUBSPOT_ACCESS_TOKEN = config["secrets"]["HUBSPOT_ACCESS_TOKEN"]
-    JIRA_EMAIL = config["secrets"]["JIRA_EMAIL"]
-    JIRA_API_TOKEN = config["secrets"]["JIRA_API_TOKEN"]
-    JIRA_SERVER = config["secrets"]["JIRA_SERVER"]
+    sec = config["secrets"]
+    GROQ_API_KEY = (sec.get("GROQ_API_KEY") or "").strip() or None
+    DEEPGRAM_API_KEY = (sec.get("DEEPGRAM_API_KEY") or "").strip() or None
+    HUBSPOT_ACCESS_TOKEN = (sec.get("HUBSPOT_ACCESS_TOKEN") or "").strip()
+    JIRA_EMAIL = (sec.get("JIRA_EMAIL") or "").strip()
+    JIRA_API_TOKEN = (sec.get("JIRA_API_TOKEN") or "").strip()
+    JIRA_SERVER = (sec.get("JIRA_SERVER") or "").strip()
+    OLLAMA_BASE_URL = sec.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    OLLAMA_MODEL = sec.get("OLLAMA_MODEL", "llama3:8b")
 except KeyError as e:
     raise HTTPException(status_code=500, detail=f"Missing config key: {e}")
 
-# Jira initialization
-jira_options = {'server': JIRA_SERVER}
-jira = JIRA(options=jira_options, basic_auth=(JIRA_EMAIL, JIRA_API_TOKEN))
+# Jira: only connect when fully configured (avoids startup failure with empty secret.config)
+jira = None
+if JIRA_SERVER and JIRA_EMAIL and JIRA_API_TOKEN:
+    try:
+        jira = JIRA(options={"server": JIRA_SERVER}, basic_auth=(JIRA_EMAIL, JIRA_API_TOKEN))
+    except Exception as e:
+        print(f"Warning: Jira client could not be initialized: {e}")
+        jira = None
 
-# Initialize OpenAI client
-client = OpenAI(api_key=OPENAI_API_KEY)
 SUPPORTED_FILE_FORMATS = {".mp3", ".mp4", ".wav"}
 
-# Initialize LLM (ChatGPT for extracting deal info and tone analysis)
-llm = ChatOpenAI(model_name="gpt-4", temperature=0, openai_api_key=OPENAI_API_KEY)
+# ----------------------------
+# Local LLM provider (Ollama)
+# ----------------------------
+def ollama_chat(messages: List[Dict[str, str]], model: str, temperature: float = 0.2) -> str:
+    """Call Ollama local chat endpoint."""
+    url = f"{OLLAMA_BASE_URL.rstrip('/')}/api/chat"
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": False,
+        "options": {"temperature": temperature},
+    }
+    resp = requests.post(url, json=payload, timeout=120)
+    resp.raise_for_status()
+    data = resp.json()
+    return (data.get("message") or {}).get("content", "").strip()
+
+def llm_predict(prompt: str) -> str:
+    return ollama_chat(
+        messages=[{"role": "user", "content": prompt}],
+        model=OLLAMA_MODEL,
+        temperature=0.2,
+    )
+
+# Initialize Groq client (optional)
+client = None
+llm = None
+if GROQ_API_KEY:
+    from groq import Groq  # type: ignore
+    from langchain_groq import ChatGroq  # type: ignore
+    client = Groq(api_key=GROQ_API_KEY)
+    llm = ChatGroq(model_name="llama-3.3-70b-versatile", temperature=0, groq_api_key=GROQ_API_KEY)
+
+# Initialize Deepgram client (optional; deepgram-sdk v3+ uses DeepgramClient + listen.v1.media)
+deepgram_client = None
+if DEEPGRAM_API_KEY:
+    from deepgram import DeepgramClient  # type: ignore
+
+    deepgram_client = DeepgramClient(api_key=DEEPGRAM_API_KEY)
 
 # FastAPI app initialization
 app = FastAPI()
@@ -62,7 +111,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Language name map (used for natural language in GPT prompt)
+# Language name map (used for natural language in prompt)
 lang_map = {
     "en": "English", "es": "Spanish", "fr": "French", "hi": "Hindi", "de": "German",
     "zh": "Chinese", "ta": "Tamil", "te": "Telugu", "ja": "Japanese"
@@ -91,8 +140,12 @@ class CalendarEventRequest(BaseModel):
     transcript: str = ""
 
 
+class AssignSpeakersInput(BaseModel):
+    transcript: str = ""
 
-def assign_speakers_with_gpt(transcript_text, model="gpt-4"):
+
+
+def assign_speakers_with_groq(transcript_text, model="llama-3.3-70b-versatile"):
     prompt = f"""
 You are given a transcript of a two-speaker conversation. Your task is to:
 
@@ -114,16 +167,25 @@ Transcript:
 Now return the labeled transcript:
 """
 
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant that formats transcripts."},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.3
-    )
-
-    labeled_transcript = response.choices[0].message.content.strip()
+    if client:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that formats transcripts."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.3,
+        )
+        labeled_transcript = response.choices[0].message.content.strip()
+    else:
+        labeled_transcript = ollama_chat(
+            messages=[
+                {"role": "system", "content": "You are a helpful assistant that formats transcripts."},
+                {"role": "user", "content": prompt},
+            ],
+            model=OLLAMA_MODEL,
+            temperature=0.2,
+        )
 
     # Normalize line endings
     normalized_transcript = "\n".join(
@@ -131,6 +193,21 @@ Now return the labeled transcript:
     )
 
     return normalized_transcript
+
+
+def labeled_transcript_to_frontend_rows(labeled: str) -> List[Dict[str, str]]:
+    """Match frontend speaker format: [{ speaker, text }, ...]."""
+    rows: List[Dict[str, str]] = []
+    for line in labeled.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = re.match(r"^([^:]+):(.*)$", line)
+        if m:
+            rows.append({"speaker": m.group(1).strip(), "text": m.group(2).strip()})
+        else:
+            rows.append({"speaker": "", "text": line})
+    return rows
 
 
 
@@ -144,6 +221,10 @@ async def transcribe_audio(file: UploadFile = File(...), language_code: str = "e
             detail=f"Unsupported file format: {ext}. Supported formats: {', '.join(SUPPORTED_FILE_FORMATS)}"
         )
 
+    if not deepgram_client:
+        raise HTTPException(status_code=503, detail="Deepgram API key not configured.")
+
+    tmp_path = None
     try:
         # Save the uploaded file to a temp file
         with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
@@ -151,16 +232,26 @@ async def transcribe_audio(file: UploadFile = File(...), language_code: str = "e
             tmp.write(content)
             tmp_path = tmp.name
 
-        # Call Whisper API using file path
+        # Call Deepgram API for transcription (SDK v3+)
         with open(tmp_path, "rb") as audio_file:
-            transcription = client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file,
-                language=language_code if language_code != "en" else None
-            )
+            buffer_data = audio_file.read()
 
-        transcript_text = transcription.text.strip()
-        labeled_transcript = assign_speakers_with_gpt(transcript_text)
+        dg_kwargs = {
+            "request": buffer_data,
+            "model": "nova-2",
+            "smart_format": True,
+        }
+        if language_code and language_code != "en":
+            dg_kwargs["language"] = language_code
+
+        dg_response = deepgram_client.listen.v1.media.transcribe_file(**dg_kwargs)
+        transcript_text = dg_response.results.channels[0].alternatives[0].transcript.strip()
+
+        if client:
+            labeled_transcript = assign_speakers_with_groq(transcript_text)
+        else:
+            labeled_transcript = transcript_text
+
         # Save the transcript to the specified path
         with open(TRANSCRIPT_PATH, "w", encoding="utf-8") as f:
             f.write(transcript_text)
@@ -173,10 +264,20 @@ async def transcribe_audio(file: UploadFile = File(...), language_code: str = "e
 
     finally:
         # Clean up the temporary file
-        if os.path.exists(tmp_path):
+        if tmp_path and os.path.exists(tmp_path):
             os.remove(tmp_path)
 
 
+@app.post("/assign_speakers_with_gpt/")
+async def assign_speakers_with_gpt_endpoint(payload: AssignSpeakersInput):
+    """Frontend expects { labeled_transcript: [{ speaker, text }, ...] }."""
+    if not payload.transcript.strip():
+        raise HTTPException(status_code=400, detail="transcript is required")
+    try:
+        labeled = assign_speakers_with_groq(payload.transcript.strip())
+        return {"labeled_transcript": labeled_transcript_to_frontend_rows(labeled)}
+    except Exception as e:
+        return {"error": str(e)}
 
 
 @app.post("/translate-text/")
@@ -193,9 +294,9 @@ async def translate_transcript(input_data: TranslationInput):
 
     # Step 2: Prepare prompt and translate
     prompt = f"Translate the following text to {input_data.language}:\n\n{transcript_text}"
-    
+
     try:
-        translation = llm.predict(prompt)
+        translation = llm_predict(prompt) if not llm else llm.predict(prompt)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Translation error: {str(e)}")
 
@@ -203,7 +304,6 @@ async def translate_transcript(input_data: TranslationInput):
 
     print("translation", translation)
     return {"translated_text": translation.strip()}
-
 
 
 
@@ -254,7 +354,7 @@ async def analyze_tone(payload: TranscriptInput = None):
     """
 
     # Predict using the LLM
-    response_str = llm.predict(prompt).strip()
+    response_str = (llm_predict(prompt).strip() if not llm else llm.predict(prompt).strip())
     print("Raw LLM response:", response_str)
 
     # Parse the JSON response
@@ -275,6 +375,11 @@ async def analyze_tone(payload: TranscriptInput = None):
 
 
 def create_jira_issue(issue_dict,transition):
+  if not jira:
+      raise HTTPException(
+          status_code=503,
+          detail="Jira is not configured. Set JIRA_SERVER, JIRA_EMAIL, and JIRA_API_TOKEN in secret.config.",
+      )
   issue = jira.create_issue(fields=issue_dict)
   print(f"✅ Created: {issue.key}")
 
@@ -329,14 +434,19 @@ Provide the extracted details as a JSON object in this format:
 Transcript:
 {transcript}
 """
-)
+) if PromptTemplate else None
 
 @app.post("/jira-deal-creation/")
 async def jira_deal_creatition(payload: TranscriptInput):
     transcript_text = payload.transcript_text
 
-    llm_chain_jira = LLMChain(llm=llm, prompt=prompt_template_jira, verbose=True)
-    extracted_details = llm_chain_jira.run({"transcript": transcript_text})
+    if LLMChain and llm and prompt_template_jira:
+        llm_chain_jira = LLMChain(llm=llm, prompt=prompt_template_jira, verbose=True)
+        extracted_details = llm_chain_jira.run({"transcript": transcript_text})
+    else:
+        extracted_details = llm_predict(
+            prompt_template_jira.format(transcript=transcript_text, transition_names="")
+        ) if prompt_template_jira else llm_predict(transcript_text)
 
     new_deal = json.loads(extracted_details)
     deal_details = {key: value for key, value in new_deal.items() if key != 'transition_name'}
@@ -354,7 +464,7 @@ async def generate_action_items(input_data: ActionItemsInput):
         # Extract transcript and tone from request body
         transcript_text = input_data.transcript
         tone = input_data.tone
-        
+
         # If no transcript provided, try to read from file
         if not transcript_text:
             if not os.path.exists(TRANSCRIPT_PATH):
@@ -372,7 +482,7 @@ async def generate_action_items(input_data: ActionItemsInput):
         1. Based on the transcript, suggest specific actions to take.
         2. The tone of the speaker is {tone}. Use this tone to suggest actions.
         Actions should be focused on moving the conversation forward and addressing any concerns or key topics raised.
-        
+
         Format your response as:
         {{
             "actions": ["action 1", "action 2", ...]
@@ -381,31 +491,38 @@ async def generate_action_items(input_data: ActionItemsInput):
         Transcript:
         {transcript_text}
         """
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a sales assistant. Your task is to analyze transcripts of sales calls and suggest actions based on the conversation and speaker's tone."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            model="gpt-4o-mini",
-            max_tokens=150
-        )
+        if client:
+            chat_completion = client.chat.completions.create(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a sales assistant. Your task is to analyze transcripts of sales calls and suggest actions based on the conversation and speaker's tone.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                model="llama-3.1-8b-instant",
+                max_tokens=150,
+            )
+            action_text = chat_completion.choices[0].message.content.strip()
+        else:
+            action_text = ollama_chat(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are a sales assistant. Your task is to analyze transcripts of sales calls and suggest actions based on the conversation and speaker's tone.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                model=OLLAMA_MODEL,
+                temperature=0.2,
+            )
 
-        # Get the response as text
-        action_text = chat_completion.choices[0].message.content.strip()
-        
         # Try to parse it as JSON
         try:
             action_data = json.loads(action_text)
             return action_data
         except json.JSONDecodeError:
             # If not valid JSON, create a basic actions array with the response
-            # This is a fallback in case GPT doesn't return properly formatted JSON
             if "actions" not in action_text.lower():
                 return {"actions": [action_text]}
             else:
@@ -420,11 +537,10 @@ async def generate_action_items(input_data: ActionItemsInput):
                             line = line[1:-1]
                         if line and line not in ['actions', 'Actions', '[', ']']:
                             actions.append(line)
-                
+
                 return {"actions": actions if actions else [action_text]}
     except Exception as e:
         return {"error": f"Error generating action items: {str(e)}"}
-
 
 
 
@@ -442,7 +558,7 @@ async def chatbot(input_data: QuestionInput):
             transcript_text = f.read()
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error reading transcript: {str(e)}")
-    
+
     print("transcript_text", transcript_text)
 
     chatbot_messages = [
@@ -452,14 +568,17 @@ async def chatbot(input_data: QuestionInput):
     ]
 
     try:
-        response = client.chat.completions.create(
-            model="gpt-4",
-            messages=chatbot_messages
-        )
-        answer = response.choices[0].message.content
+        if client:
+            response = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=chatbot_messages,
+            )
+            answer = response.choices[0].message.content
+        else:
+            answer = ollama_chat(messages=chatbot_messages, model=OLLAMA_MODEL, temperature=0.2)
         return {"answer": answer}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"OpenAI API error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Groq API error: {str(e)}")
 
 
 # Define the combined prompt template for the meeting data extraction
@@ -482,14 +601,26 @@ combined_prompt_template11 = PromptTemplate(
     Transcript:
     {transcript}
     """
-)
+) if PromptTemplate else None
 
 # Create a single chain using the combined prompt
-combined_chain = LLMChain(prompt=combined_prompt_template11, llm=llm)
+combined_chain = LLMChain(prompt=combined_prompt_template11, llm=llm) if (LLMChain and llm and combined_prompt_template11) else None
 
 # Function to extract meeting data from transcript
 def extract_meeting_data(transcript_text):
-    result = combined_chain.run({"transcript": transcript_text})
+    # Avoid LangChain/Groq in Ollama-only mode.
+    template = """
+    You are an expert in summarizing business meetings. Based on the following meeting transcript, provide the following:
+
+    1. **Meeting Title**: Determine the main title or subject of the meeting.
+    2. **Agenda Items**: Extract key agenda items as a bulleted list.
+    3. **Summary**: Provide structured summary sections with bullet points.
+    4. **Action Items**: Extract action items as bullet points (include responsible if mentioned).
+
+    Transcript:
+    {transcript}
+    """
+    result = llm_predict(template.format(transcript=transcript_text))
 
     meeting_data = {
         "meeting_title": "",
@@ -550,7 +681,7 @@ class MeetingPDF(FPDF):
         self.set_text_color(50, 50, 50)  # Dark gray text is easier to read than pure black
         self.multi_cell(0, line_height, body)
         self.ln(3)  # Add a bit more space between items
-        
+
     def add_item_with_bullet(self, text, bullet_type="•"):
         self.set_font("Arial", "", 11)
         self.set_text_color(50, 50, 50)
@@ -577,7 +708,7 @@ class MeetingPDF(FPDF):
 
 @app.post("/download-report/")
 async def write_meeting_pdf_from_transcript(payload: TranscriptInput):
-    # Extract data using GPT model
+    # Extract data using LLM model
     meeting_data = extract_meeting_data(payload.transcript_text)
 
     # Extract individual fields from the result
@@ -596,7 +727,7 @@ async def write_meeting_pdf_from_transcript(payload: TranscriptInput):
     pdf.set_font("Arial", "B", 14)
     pdf.set_text_color(50, 50, 50)
     pdf.cell(0, 8, meeting_title, ln=True, align="C")
-    
+
     # Add a horizontal separator line
     pdf.set_draw_color(200, 200, 200)
     pdf.line(40, pdf.get_y() + 5, 170, pdf.get_y() + 5)
@@ -623,7 +754,7 @@ async def write_meeting_pdf_from_transcript(payload: TranscriptInput):
         pdf.set_text_color(100, 100, 100)
         pdf.cell(0, 8, "The following action items were identified:", ln=True)
         pdf.ln(2)
-        
+
         for i, action in enumerate(action_items, 1):
             # Use a different bullet style for action items
             bullet = f"{i}."
@@ -663,7 +794,7 @@ async def download_calendar(input_data: CalendarEventRequest):
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"Error reading transcript file: {str(e)}")
 
-        # Extract events using GPT
+        # Extract events using Groq
         prompt = f"""
         Extract any scheduled events mentioned in the transcript:
 
@@ -680,22 +811,31 @@ async def download_calendar(input_data: CalendarEventRequest):
         If no events are found, return an empty array.
         """
 
-        chat_completion = client.chat.completions.create(
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are an assistant that extracts calendar events from transcripts into structured data."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            model="gpt-4o-mini",
-            max_tokens=800
-        )
-
-        response_text = chat_completion.choices[0].message.content.strip()
+        if client:
+            chat_completion = client.chat.completions.create(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are an assistant that extracts calendar events from transcripts into structured data.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                model="llama-3.1-8b-instant",
+                max_tokens=800,
+            )
+            response_text = chat_completion.choices[0].message.content.strip()
+        else:
+            response_text = ollama_chat(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "You are an assistant that extracts calendar events from transcripts into structured data.",
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+                model=OLLAMA_MODEL,
+                temperature=0.2,
+            )
 
         # Handle JSON extraction from response
         events = []
@@ -775,3 +915,9 @@ async def download_calendar(input_data: CalendarEventRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error creating calendar: {str(e)}")
+
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run("app_main:app", host="0.0.0.0", port=8000, reload=True)
