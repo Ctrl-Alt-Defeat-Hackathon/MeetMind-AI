@@ -296,7 +296,7 @@ async def translate_transcript(input_data: TranslationInput):
     prompt = f"Translate the following text to {input_data.language}:\n\n{transcript_text}"
 
     try:
-        translation = llm_predict(prompt) if not llm else llm.predict(prompt)
+        translation = llm_predict(prompt) if not llm else llm.invoke(prompt).content
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Translation error: {str(e)}")
 
@@ -354,7 +354,7 @@ async def analyze_tone(payload: TranscriptInput = None):
     """
 
     # Predict using the LLM
-    response_str = (llm_predict(prompt).strip() if not llm else llm.predict(prompt).strip())
+    response_str = (llm_predict(prompt).strip() if not llm else llm.invoke(prompt).content.strip())
     print("Raw LLM response:", response_str)
 
     # Parse the JSON response
