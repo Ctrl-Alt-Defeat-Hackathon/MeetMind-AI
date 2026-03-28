@@ -435,14 +435,15 @@ function App() {
   };
 
   const downloadReport = async () => {
-    if (!originalTranscript || isDownloading) return;
+    const text = originalTranscript || transcript;
+    if (!text.trim() || isDownloading) return;
     
     setIsDownloading(true);
     setError('');
 
     try {
       const payload: TranscriptInput = {
-        transcript_text: originalTranscript,
+        transcript_text: text,
         filename: 'meeting_minutes.pdf'
       };
       
@@ -455,7 +456,14 @@ function App() {
       });
       
       if (!response.ok) {
-        throw new Error('Failed to download report');
+        let detail = 'Failed to download report';
+        try {
+          const errBody = await response.json();
+          if (errBody.detail) detail = typeof errBody.detail === 'string' ? errBody.detail : JSON.stringify(errBody.detail);
+        } catch {
+          /* ignore */
+        }
+        throw new Error(detail);
       }
       
       // Get the blob from the response
@@ -475,7 +483,8 @@ function App() {
       document.body.removeChild(a);
       
     } catch (err) {
-      setError('Failed to download report. Please try again.');
+      const msg = err instanceof Error ? err.message : 'Failed to download report. Please try again.';
+      setError(msg);
       console.error('Download error:', err);
     } finally {
       setIsDownloading(false);
@@ -684,7 +693,7 @@ function App() {
               <div className="grid grid-cols-2 gap-3">
                 <button
                   onClick={downloadReport}
-                  disabled={isDownloading || !originalTranscript}
+                  disabled={isDownloading || !(originalTranscript || transcript).trim()}
                   className="bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded-lg flex items-center justify-center space-x-2 disabled:bg-purple-300 text-sm"
                 >
                   <Download className="w-4 h-4" />

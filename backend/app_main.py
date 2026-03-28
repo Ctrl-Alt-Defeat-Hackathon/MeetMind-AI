@@ -11,7 +11,7 @@ import tempfile
 from io import BytesIO
 import configparser
 from fpdf import FPDF
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 import requests
 
 # LangChain is optional; Ollama-only mode does not need it.
@@ -606,9 +606,15 @@ combined_prompt_template11 = PromptTemplate(
 # Create a single chain using the combined prompt
 combined_chain = LLMChain(prompt=combined_prompt_template11, llm=llm) if (LLMChain and llm and combined_prompt_template11) else None
 
+def _run_meeting_summary_prompt(prompt: str) -> str:
+    """Use Groq/LangChain when configured; otherwise local Ollama."""
+    if llm:
+        return llm.predict(prompt)
+    return llm_predict(prompt)
+
+
 # Function to extract meeting data from transcript
 def extract_meeting_data(transcript_text):
-    # Avoid LangChain/Groq in Ollama-only mode.
     template = """
     You are an expert in summarizing business meetings. Based on the following meeting transcript, provide the following:
 
@@ -620,7 +626,7 @@ def extract_meeting_data(transcript_text):
     Transcript:
     {transcript}
     """
-    result = llm_predict(template.format(transcript=transcript_text))
+    result = _run_meeting_summary_prompt(template.format(transcript=transcript_text))
 
     meeting_data = {
         "meeting_title": "",
@@ -629,11 +635,23 @@ def extract_meeting_data(transcript_text):
         "action_items": []
     }
 
-    # Use regex to extract each section
-    title_match = re.search(r"\*\*Meeting Title\*\*:\s*(.*)", result)
-    agenda_match = re.search(r"\*\*Agenda Items\*\*:\s*((?:- .*\n?)+)", result)
-    summary_match = re.search(r"\*\*Summary\*\*:\s*((?:.|\n)*?)(?=\*\*Action Items\*\*|$)", result)
-    action_match = re.search(r"\*\*Action Items\*\*:\s*((?:- .*\n?)+)", result)
+    # Use regex to extract each section (with and without markdown **)
+    title_match = re.search(r"\*\*Meeting Title\*\*\s*:\s*(.*)", result, re.IGNORECASE)
+    if not title_match:
+        title_match = re.search(r"Meeting Title\s*:\s*(.+)", result, re.IGNORECASE)
+    agenda_match = re.search(r"\*\*Agenda Items\*\*\s*:\s*((?:- .*\n?)+)", result, re.IGNORECASE | re.DOTALL)
+    if not agenda_match:
+        agenda_match = re.search(r"Agenda Items\s*:\s*((?:- .*\n?)+)", result, re.IGNORECASE | re.DOTALL)
+    summary_match = re.search(
+        r"\*\*Summary\*\*\s*:\s*((?:.|\n)*?)(?=\*\*Action Items\*\*|Action Items\s*:|\Z)",
+        result,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if not summary_match:
+        summary_match = re.search(r"Summary\s*:\s*((?:.|\n)*?)(?=Action Items\s*:|$)", result, re.IGNORECASE | re.DOTALL)
+    action_match = re.search(r"\*\*Action Items\*\*\s*:\s*((?:- .*\n?)+)", result, re.IGNORECASE | re.DOTALL)
+    if not action_match:
+        action_match = re.search(r"Action Items\s*:\s*((?:- .*\n?)+)", result, re.IGNORECASE | re.DOTALL)
 
     if title_match:
         meeting_data["meeting_title"] = title_match.group(1).strip()
@@ -649,7 +667,18 @@ def extract_meeting_data(transcript_text):
         action_items = [item.strip("- ").strip() for item in action_match.group(1).strip().split("\n") if item.strip()]
         meeting_data["action_items"] = action_items
 
+    if not meeting_data["meeting_title"] and not meeting_data["summary"]:
+        meeting_data["meeting_title"] = "Meeting minutes"
+        meeting_data["summary"] = result.strip()[:8000] or "(No summary generated.)"
+
     return meeting_data
+
+
+def _pdf_safe(text: str) -> str:
+    """FPDF core fonts are limited; avoid encode errors on smart quotes / emoji."""
+    if not text:
+        return ""
+    return text.encode("latin-1", "replace").decode("latin-1")
 
 
 class MeetingPDF(FPDF):
@@ -708,32 +737,29 @@ class MeetingPDF(FPDF):
 
 @app.post("/download-report/")
 async def write_meeting_pdf_from_transcript(payload: TranscriptInput):
-    # Extract data using LLM model
-    meeting_data = extract_meeting_data(payload.transcript_text)
+    try:
+        meeting_data = extract_meeting_data(payload.transcript_text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Could not generate meeting summary: {str(e)}")
 
-    # Extract individual fields from the result
-    meeting_title = meeting_data["meeting_title"]
-    agenda_items = meeting_data["agenda_items"]
-    summary = meeting_data["summary"]
-    action_items = meeting_data["action_items"]
+    meeting_title = _pdf_safe(meeting_data["meeting_title"])
+    agenda_items = [_pdf_safe(x) for x in meeting_data["agenda_items"]]
+    summary = _pdf_safe(meeting_data["summary"])
+    action_items = [_pdf_safe(x) for x in meeting_data["action_items"]]
 
-    # Create the PDF with enhanced styling
     pdf = MeetingPDF()
-    pdf.set_auto_page_break(auto=True, margin=25)  # Increased margin for better readability
+    pdf.set_auto_page_break(auto=True, margin=25)
     pdf.add_page()
 
-    # Meeting Title with better styling
-    pdf.set_y(40)  # Position after header
+    pdf.set_y(40)
     pdf.set_font("Arial", "B", 14)
     pdf.set_text_color(50, 50, 50)
-    pdf.cell(0, 8, meeting_title, ln=True, align="C")
+    pdf.cell(0, 8, meeting_title or "Meeting minutes", ln=True, align="C")
 
-    # Add a horizontal separator line
     pdf.set_draw_color(200, 200, 200)
     pdf.line(40, pdf.get_y() + 5, 170, pdf.get_y() + 5)
     pdf.ln(15)
 
-    # Agenda Section with enhanced styling
     pdf.section_title("Meeting Agenda")
     if agenda_items:
         for i, item in enumerate(agenda_items, 1):
@@ -742,12 +768,10 @@ async def write_meeting_pdf_from_transcript(payload: TranscriptInput):
         pdf.section_body("No agenda items recorded.", line_height=7)
     pdf.ln(5)
 
-    # Summary Section with better spacing and styling
     pdf.section_title("Meeting Summary")
     pdf.section_body(summary.strip(), line_height=7)
     pdf.ln(5)
 
-    # Action Items Section with visual enhancements
     pdf.section_title("Action Items")
     if action_items:
         pdf.set_font("Arial", "I", 10)
@@ -756,20 +780,22 @@ async def write_meeting_pdf_from_transcript(payload: TranscriptInput):
         pdf.ln(2)
 
         for i, action in enumerate(action_items, 1):
-            # Use a different bullet style for action items
             bullet = f"{i}."
             pdf.add_item_with_bullet(action, bullet)
     else:
         pdf.section_body("No specific action items recorded.", line_height=7)
 
-    # Save the PDF
-    pdf.output(payload.filename)
-    print(f"✅ Meeting PDF saved as: {payload.filename}")
+    out = pdf.output(dest="S")
+    if isinstance(out, str):
+        pdf_bytes = out.encode("latin-1")
+    else:
+        pdf_bytes = bytes(out)
 
-    return FileResponse(
-        path=payload.filename,
-        filename=payload.filename,
-        media_type='application/pdf'
+    fname = payload.filename or "meeting_minutes.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
     )
 
 
