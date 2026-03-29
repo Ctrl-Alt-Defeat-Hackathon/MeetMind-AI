@@ -130,7 +130,7 @@ function App() {
   const [selectedJiraProject, setSelectedJiraProject] = useState('');
   const [isLoadingJiraProjects, setIsLoadingJiraProjects] = useState(false);
   const [isCreatingJiraTasks, setIsCreatingJiraTasks] = useState(false);
-  const [jiraTaskResults, setJiraTaskResults] = useState<{created: {key: string; summary: string; url: string}[]; failed: {summary: string; error: string}[]} | null>(null);
+  const [jiraTaskResults, setJiraTaskResults] = useState<{created: {key: string; summary: string; description?: string; url: string}[]; failed: {summary: string; error: string}[]} | null>(null);
   const [jiraModalError, setJiraModalError] = useState('');
   const [popupContent, setPopupContent] = useState('');
   const [showCalendarModal, setShowCalendarModal] = useState(false);
@@ -794,12 +794,17 @@ function App() {
                     <p className="text-sm font-medium text-green-700 mb-2">✅ {jiraTaskResults.created.length} task{jiraTaskResults.created.length > 1 ? 's' : ''} created</p>
                     <ul className="space-y-1 border rounded-lg divide-y divide-gray-100">
                       {jiraTaskResults.created.map((issue, idx) => (
-                        <li key={idx} className="px-3 py-2 text-sm flex items-center justify-between gap-2">
-                          <span className="text-gray-700 truncate">{issue.summary}</span>
-                          <a href={issue.url} target="_blank" rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 text-xs font-medium text-indigo-600 hover:text-indigo-800 shrink-0">
-                            {issue.key} <ExternalLink className="w-3 h-3" />
-                          </a>
+                        <li key={idx} className="px-3 py-2 text-sm">
+                          <div className="flex items-center justify-between gap-2 mb-1">
+                            <span className="font-medium text-gray-900">{issue.summary}</span>
+                            <a href={issue.url} target="_blank" rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 text-xs font-medium text-indigo-600 hover:text-indigo-800 shrink-0">
+                              {issue.key} <ExternalLink className="w-3 h-3" />
+                            </a>
+                          </div>
+                          {issue.description && (
+                            <p className="text-xs text-gray-500">{issue.description}</p>
+                          )}
                         </li>
                       ))}
                     </ul>
@@ -940,17 +945,7 @@ function App() {
             <div className="bg-white rounded-lg shadow-sm p-4 flex-grow overflow-auto">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="font-medium">Actions to Take</h3>
-                <div className="flex items-center gap-2">
-                  {isLoadingActionItems && <p className="text-sm text-purple-500">Loading...</p>}
-                  {!isLoadingActionItems && actionItems.length > 0 && (
-                    <button
-                      onClick={openJiraModal}
-                      className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-indigo-50 text-indigo-700 hover:bg-indigo-100 font-medium"
-                    >
-                      <ClipboardList className="w-3 h-3" /> Push to Jira
-                    </button>
-                  )}
-                </div>
+                {isLoadingActionItems && <p className="text-sm text-purple-500">Loading...</p>}
               </div>
               <div className="pr-2">
                 {actionItems.length > 0 ? (
@@ -1081,12 +1076,12 @@ function App() {
                 </button>
                 
                 <button
-                  onClick={createJiraDeal}
-                  disabled={isCreatingJiraDeal || !originalTranscript}
+                  onClick={openJiraModal}
+                  disabled={!originalTranscript || actionItems.length === 0}
                   className="bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded-lg flex items-center justify-center space-x-2 disabled:bg-purple-300 text-sm"
                 >
                   <ClipboardList className="w-4 h-4" />
-                  <span>{isCreatingJiraDeal ? 'Creating...' : 'Add deal to Jira'}</span>
+                  <span>Push to Jira</span>
                 </button>
                 
                 <button

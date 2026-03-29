@@ -474,6 +474,30 @@ async def get_jira_projects():
         raise HTTPException(status_code=500, detail=f"Error fetching Jira projects: {str(e)}")
 
 
+def _shorten_action_item(text: str) -> str:
+    """Use LLM to generate a short Jira task title from a full action item description."""
+    prompt = (
+        "Generate a short Jira task title (max 8 words) for the following action item. "
+        "Return only the title, no quotes or punctuation at the end.\n\n"
+        f"Action item: {text}"
+    )
+    try:
+        if client:
+            resp = client.chat.completions.create(
+                model="llama-3.1-8b-instant",
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=30,
+                temperature=0.2,
+            )
+            return resp.choices[0].message.content.strip()[:255]
+        else:
+            return llm_predict(prompt).strip()[:255]
+    except Exception:
+        # Fallback: truncate to first 10 words
+        words = text.split()
+        return " ".join(words[:10])
+
+
 @app.post("/jira-action-items/")
 async def create_jira_action_items(payload: ActionItemsJiraInput):
     if not jira:
@@ -485,14 +509,17 @@ async def create_jira_action_items(payload: ActionItemsJiraInput):
     failed = []
     for item in payload.action_items:
         try:
+            title = _shorten_action_item(item)
             issue = jira.create_issue(fields={
                 "project": {"key": payload.project_key},
-                "summary": item[:255],
+                "summary": title,
+                "description": item,
                 "issuetype": {"name": "Task"},
             })
             created.append({
                 "key": issue.key,
-                "summary": item,
+                "summary": title,
+                "description": item,
                 "url": f"{JIRA_SERVER.rstrip('/')}/browse/{issue.key}",
             })
         except Exception as e:
