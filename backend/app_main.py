@@ -1,5 +1,5 @@
 import os
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, validator, ValidationError
 import re
 import os
@@ -138,6 +138,8 @@ class TranscriptInput(BaseModel):
 # Add this Pydantic model with your other models
 class CalendarEventRequest(BaseModel):
     transcript: str = ""
+    # If set (e.g. from POST /calendar-events/), ICS generation skips a second LLM call
+    events: Optional[List[Dict[str, Any]]] = None
 
 
 class AssignSpeakersInput(BaseModel):
@@ -454,6 +456,49 @@ async def jira_deal_creatition(payload: TranscriptInput):
 
     output = create_jira_issue(deal_details, transition_name)
     return output
+
+
+class ActionItemsJiraInput(BaseModel):
+    action_items: List[str]
+    project_key: str
+
+
+@app.get("/jira-projects/")
+async def get_jira_projects():
+    if not jira:
+        raise HTTPException(status_code=503, detail="Jira is not configured.")
+    try:
+        projects = jira.projects()
+        return {"projects": [{"key": p.key, "name": p.name} for p in projects]}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching Jira projects: {str(e)}")
+
+
+@app.post("/jira-action-items/")
+async def create_jira_action_items(payload: ActionItemsJiraInput):
+    if not jira:
+        raise HTTPException(status_code=503, detail="Jira is not configured.")
+    if not payload.action_items:
+        raise HTTPException(status_code=400, detail="No action items provided.")
+
+    created = []
+    failed = []
+    for item in payload.action_items:
+        try:
+            issue = jira.create_issue(fields={
+                "project": {"key": payload.project_key},
+                "summary": item[:255],
+                "issuetype": {"name": "Task"},
+            })
+            created.append({
+                "key": issue.key,
+                "summary": item,
+                "url": f"{JIRA_SERVER.rstrip('/')}/browse/{issue.key}",
+            })
+        except Exception as e:
+            failed.append({"summary": item, "error": str(e)})
+
+    return {"created": created, "failed": failed}
 
 
 
@@ -800,28 +845,22 @@ async def write_meeting_pdf_from_transcript(payload: TranscriptInput):
 
 
 
-
-# Add this endpoint to your app
-@app.post("/download-calendar/")
-async def download_calendar(input_data: CalendarEventRequest):
-    """Generate and download calendar file directly from transcript"""
+def _resolve_transcript_for_calendar(transcript: str) -> str:
+    """Use request body transcript, else transcript file on disk."""
+    if transcript and transcript.strip():
+        return transcript.strip()
+    if not os.path.exists(TRANSCRIPT_PATH):
+        raise HTTPException(status_code=404, detail="Transcript file not found.")
     try:
-        # Get transcript from request or from file if empty
-        transcript_text = input_data.transcript
+        with open(TRANSCRIPT_PATH, "r", encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error reading transcript file: {str(e)}")
 
-        if not transcript_text:
-            # Try to get transcript from the file (using your existing pattern)
-            if not os.path.exists(TRANSCRIPT_PATH):
-                raise HTTPException(status_code=404, detail="Transcript file not found.")
 
-            try:
-                with open(TRANSCRIPT_PATH, "r", encoding="utf-8") as f:
-                    transcript_text = f.read()
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=f"Error reading transcript file: {str(e)}")
-
-        # Extract events using Groq
-        prompt = f"""
+def extract_calendar_events_from_transcript(transcript_text: str) -> List[Dict[str, Any]]:
+    """LLM: extract structured events from transcript text."""
+    prompt = f"""
         Extract any scheduled events mentioned in the transcript:
 
         {transcript_text}
@@ -837,108 +876,134 @@ async def download_calendar(input_data: CalendarEventRequest):
         If no events are found, return an empty array.
         """
 
-        if client:
-            chat_completion = client.chat.completions.create(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are an assistant that extracts calendar events from transcripts into structured data.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                model="llama-3.1-8b-instant",
-                max_tokens=800,
-            )
-            response_text = chat_completion.choices[0].message.content.strip()
-        else:
-            response_text = ollama_chat(
-                messages=[
-                    {
-                        "role": "system",
-                        "content": "You are an assistant that extracts calendar events from transcripts into structured data.",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                model=OLLAMA_MODEL,
-                temperature=0.2,
-            )
+    if client:
+        chat_completion = client.chat.completions.create(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an assistant that extracts calendar events from transcripts into structured data.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            model="llama-3.1-8b-instant",
+            max_tokens=800,
+        )
+        response_text = chat_completion.choices[0].message.content.strip()
+    else:
+        response_text = ollama_chat(
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an assistant that extracts calendar events from transcripts into structured data.",
+                },
+                {"role": "user", "content": prompt},
+            ],
+            model=OLLAMA_MODEL,
+            temperature=0.2,
+        )
 
-        # Handle JSON extraction from response
-        events = []
-        try:
-            # Clean up response if it contains markdown or explanations
-            if "```json" in response_text:
-                match = re.search(r'```(?:json)?(.*?)```', response_text, re.DOTALL)
-                if match:
-                    response_text = match.group(1).strip()
-            events = json.loads(response_text)
-        except json.JSONDecodeError:
-            # Create a default event if parsing fails
-            today = datetime.today().strftime('%Y-%m-%d')
-            events = [{
+    events: List[Dict[str, Any]] = []
+    try:
+        if "```json" in response_text:
+            match = re.search(r"```(?:json)?(.*?)```", response_text, re.DOTALL)
+            if match:
+                response_text = match.group(1).strip()
+        parsed = json.loads(response_text)
+        if isinstance(parsed, list):
+            events = parsed
+    except json.JSONDecodeError:
+        pass
+
+    if not events:
+        today = datetime.today().strftime("%Y-%m-%d")
+        events = [
+            {
                 "title": "Meeting Follow-up",
                 "date": today,
                 "start_time": "09:00",
                 "end_time": "10:00",
                 "description": "Follow-up to meeting discussion",
-                "attendees": "Meeting participants"
-            }]
-
-        # Generate ICS file
-        cal = Calendar()
-        cal.add('prodid', '-//Meeting Event Extractor//EN//')
-        cal.add('version', '2.0')
-
-        for event_data in events:
-            event = Event()
-            event.add('summary', event_data.get('title', 'Untitled Event'))
-
-            date_str = event_data.get('date', datetime.today().strftime('%Y-%m-%d'))
-            start_time_str = event_data.get('start_time', '09:00')
-            end_time_str = event_data.get('end_time', '10:00')
-
-            try:
-                start_dt = datetime.strptime(f"{date_str} {start_time_str}", "%Y-%m-%d %H:%M")
-                end_dt = datetime.strptime(f"{date_str} {end_time_str}", "%Y-%m-%d %H:%M")
-            except ValueError:
-                today = datetime.today().strftime('%Y-%m-%d')
-                start_dt = datetime.strptime(f"{today} 09:00", "%Y-%m-%d %H:%M")
-                end_dt = datetime.strptime(f"{today} 10:00", "%Y-%m-%d %H:%M")
-
-            event.add('dtstart', start_dt)
-            event.add('dtend', end_dt)
-            event.add('description', event_data.get('description', 'No description provided'))
-
-            # Add attendees
-            attendees = event_data.get('attendees', '')
-            attendee_list = []
-
-            if isinstance(attendees, list):
-                attendee_list = attendees
-            elif isinstance(attendees, str) and attendees:
-                attendee_list = [att.strip() for att in attendees.split(',') if att.strip()]
-
-            for attendee in attendee_list:
-                if attendee:
-                    attendee_addr = vCalAddress(f'MAILTO:{str(attendee).replace(" ", "").lower()}@example.com')
-                    attendee_addr.params['cn'] = vText(str(attendee))
-                    event.add('attendee', attendee_addr, encode=0)
-
-            cal.add_component(event)
-
-        # Create a file-like object for the ICS
-        ics_data = cal.to_ical()
-        ics_file = io.BytesIO(ics_data)
-
-        # Return as a downloadable file
-        return StreamingResponse(
-            iter([ics_file.getvalue()]),
-            media_type="text/calendar",
-            headers={
-                "Content-Disposition": "attachment; filename=meeting_events.ics"
+                "attendees": "Meeting participants",
             }
-        )
+        ]
+    return events
 
+
+def build_ics_from_events(events: List[Dict[str, Any]]) -> bytes:
+    cal = Calendar()
+    cal.add("prodid", "-//MeetSmart//EN//")
+    cal.add("version", "2.0")
+
+    for event_data in events:
+        event = Event()
+        event.add("summary", event_data.get("title", "Untitled Event"))
+
+        date_str = event_data.get("date", datetime.today().strftime("%Y-%m-%d"))
+        start_time_str = event_data.get("start_time", "09:00")
+        end_time_str = event_data.get("end_time", "10:00")
+
+        try:
+            start_dt = datetime.strptime(f"{date_str} {start_time_str}", "%Y-%m-%d %H:%M")
+            end_dt = datetime.strptime(f"{date_str} {end_time_str}", "%Y-%m-%d %H:%M")
+        except ValueError:
+            today = datetime.today().strftime("%Y-%m-%d")
+            start_dt = datetime.strptime(f"{today} 09:00", "%Y-%m-%d %H:%M")
+            end_dt = datetime.strptime(f"{today} 10:00", "%Y-%m-%d %H:%M")
+
+        event.add("dtstart", start_dt)
+        event.add("dtend", end_dt)
+        event.add("description", event_data.get("description", "No description provided"))
+
+        attendees = event_data.get("attendees", "")
+        attendee_list: List[str] = []
+        if isinstance(attendees, list):
+            attendee_list = [str(a) for a in attendees if a]
+        elif isinstance(attendees, str) and attendees:
+            attendee_list = [att.strip() for att in attendees.split(",") if att.strip()]
+
+        for attendee in attendee_list:
+            if attendee:
+                attendee_addr = vCalAddress(f'MAILTO:{str(attendee).replace(" ", "").lower()}@example.com')
+                attendee_addr.params["cn"] = vText(str(attendee))
+                event.add("attendee", attendee_addr, encode=0)
+
+        cal.add_component(event)
+
+    return cal.to_ical()
+
+
+@app.post("/calendar-events/")
+async def calendar_events_json(input_data: CalendarEventRequest):
+    """Return extracted events as JSON (for Google/Outlook links in the UI)."""
+    try:
+        transcript_text = _resolve_transcript_for_calendar(input_data.transcript)
+        events = extract_calendar_events_from_transcript(transcript_text)
+        return {"events": events}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error extracting calendar events: {str(e)}")
+
+
+@app.post("/download-calendar/")
+async def download_calendar(input_data: CalendarEventRequest):
+    """Generate and download .ics from transcript, or from pre-extracted events."""
+    try:
+        events: List[Dict[str, Any]]
+        if input_data.events is not None and len(input_data.events) > 0:
+            events = input_data.events
+        else:
+            transcript_text = _resolve_transcript_for_calendar(input_data.transcript)
+            events = extract_calendar_events_from_transcript(transcript_text)
+
+        ics_bytes = build_ics_from_events(events)
+        return StreamingResponse(
+            iter([ics_bytes]),
+            media_type="text/calendar",
+            headers={"Content-Disposition": 'attachment; filename="meeting_events.ics"'},
+        )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error creating calendar: {str(e)}")
 

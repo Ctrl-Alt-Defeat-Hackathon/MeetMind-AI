@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Upload, Youtube, FileVideo, FileAudio, X, Link, Send, MessageSquare, Volume2, ChevronDown, RefreshCw, Download, Calendar, ClipboardList, Mail } from 'lucide-react';
+import { Upload, Youtube, FileVideo, FileAudio, X, Link, Send, MessageSquare, Volume2, ChevronDown, RefreshCw, Download, Calendar, ClipboardList, Mail, ExternalLink } from 'lucide-react';
 
 interface AnalysisState {
   file?: File;
@@ -47,6 +47,49 @@ interface TranscriptInput {
   filename?: string;
 }
 
+interface CalendarEventItem {
+  title: string;
+  date: string;
+  start_time: string;
+  end_time: string;
+  description?: string;
+  attendees?: string | string[];
+}
+
+function formatGoogleCalendarDates(date: string, startTime: string, endTime: string): string {
+  const ymd = date.replace(/\D/g, '').slice(0, 8);
+  const [sh = '09', sm = '00'] = (startTime || '09:00').split(':');
+  const [eh = '10', em = '00'] = (endTime || '10:00').split(':');
+  return `${ymd}T${sh.padStart(2, '0')}${sm.padStart(2, '0')}00/${ymd}T${eh.padStart(2, '0')}${em.padStart(2, '0')}00`;
+}
+
+function buildGoogleCalendarUrl(ev: CalendarEventItem): string {
+  const dates = formatGoogleCalendarDates(ev.date, ev.start_time, ev.end_time);
+  const params = new URLSearchParams({
+    action: 'TEMPLATE',
+    text: ev.title || 'Event',
+    dates,
+    details: ev.description || '',
+  });
+  return `https://calendar.google.com/calendar/render?${params.toString()}`;
+}
+
+/** Outlook on the web */
+function buildOutlookWebUrl(ev: CalendarEventItem): string {
+  const d = ev.date || new Date().toISOString().slice(0, 10);
+  const [sh = '09', sm = '00'] = (ev.start_time || '09:00').split(':');
+  const [eh = '10', em = '00'] = (ev.end_time || '10:00').split(':');
+  const startdt = `${d}T${sh.padStart(2, '0')}:${sm.padStart(2, '0')}:00`;
+  const enddt = `${d}T${eh.padStart(2, '0')}:${em.padStart(2, '0')}:00`;
+  const q = new URLSearchParams({
+    subject: ev.title || 'Event',
+    startdt,
+    enddt,
+    body: ev.description || '',
+  });
+  return `https://outlook.office.com/calendar/0/deeplink/compose?${q.toString()}`;
+}
+
 function App() {
   const [dragActive, setDragActive] = useState(false);
   const [files, setFiles] = useState<File[]>([]);
@@ -82,7 +125,19 @@ function App() {
   const [isLabelingSpeakers, setIsLabelingSpeakers] = useState(false);
   const [isCreatingJiraDeal, setIsCreatingJiraDeal] = useState(false);
   const [showLanguagePopup, setShowLanguagePopup] = useState(false);
+  const [showJiraModal, setShowJiraModal] = useState(false);
+  const [jiraProjects, setJiraProjects] = useState<{key: string; name: string}[]>([]);
+  const [selectedJiraProject, setSelectedJiraProject] = useState('');
+  const [isLoadingJiraProjects, setIsLoadingJiraProjects] = useState(false);
+  const [isCreatingJiraTasks, setIsCreatingJiraTasks] = useState(false);
+  const [jiraTaskResults, setJiraTaskResults] = useState<{created: {key: string; summary: string; url: string}[]; failed: {summary: string; error: string}[]} | null>(null);
+  const [jiraModalError, setJiraModalError] = useState('');
   const [popupContent, setPopupContent] = useState('');
+  const [showCalendarModal, setShowCalendarModal] = useState(false);
+  const [calendarEvents, setCalendarEvents] = useState<CalendarEventItem[] | null>(null);
+  const [isCalendarLoading, setIsCalendarLoading] = useState(false);
+  const [calendarModalError, setCalendarModalError] = useState('');
+  const [isDownloadingIcs, setIsDownloadingIcs] = useState(false);
 
   useEffect(() => {
     if (chatEndRef.current) {
@@ -526,6 +581,128 @@ function App() {
     }
   };
 
+  const openJiraModal = async () => {
+    setShowJiraModal(true);
+    setJiraTaskResults(null);
+    setJiraModalError('');
+    setSelectedJiraProject('');
+    setIsLoadingJiraProjects(true);
+    try {
+      const response = await fetch('/api/jira-projects/');
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.detail || 'Failed to load Jira projects');
+      }
+      const data = await response.json();
+      setJiraProjects(data.projects || []);
+      if (data.projects?.length > 0) setSelectedJiraProject(data.projects[0].key);
+    } catch (err) {
+      setJiraModalError(err instanceof Error ? err.message : 'Failed to load Jira projects');
+    } finally {
+      setIsLoadingJiraProjects(false);
+    }
+  };
+
+  const pushActionItemsToJira = async () => {
+    if (!selectedJiraProject || actionItems.length === 0) return;
+    setIsCreatingJiraTasks(true);
+    setJiraModalError('');
+    try {
+      const response = await fetch('/api/jira-action-items/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action_items: actionItems, project_key: selectedJiraProject }),
+      });
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.detail || 'Failed to create Jira tasks');
+      }
+      const data = await response.json();
+      setJiraTaskResults(data);
+    } catch (err) {
+      setJiraModalError(err instanceof Error ? err.message : 'Failed to create Jira tasks');
+    } finally {
+      setIsCreatingJiraTasks(false);
+    }
+  };
+
+  const openCalendarModal = async () => {
+    const text = (originalTranscript || transcript).trim();
+    if (!text) return;
+    setShowCalendarModal(true);
+    setCalendarModalError('');
+    setCalendarEvents(null);
+    setIsCalendarLoading(true);
+    try {
+      const response = await fetch('/api/calendar-events/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ transcript: text }),
+      });
+      if (!response.ok) {
+        let detail = 'Failed to load calendar events';
+        try {
+          const errBody = await response.json();
+          if (errBody.detail) {
+            detail = typeof errBody.detail === 'string' ? errBody.detail : JSON.stringify(errBody.detail);
+          }
+        } catch {
+          /* ignore */
+        }
+        throw new Error(detail);
+      }
+      const data = await response.json();
+      setCalendarEvents(Array.isArray(data.events) ? data.events : []);
+    } catch (err) {
+      setCalendarModalError(err instanceof Error ? err.message : 'Failed to load calendar events');
+    } finally {
+      setIsCalendarLoading(false);
+    }
+  };
+
+  const downloadCalendarIcs = async () => {
+    const text = (originalTranscript || transcript).trim();
+    if (!text) return;
+    setIsDownloadingIcs(true);
+    setCalendarModalError('');
+    try {
+      const body: { transcript: string; events?: CalendarEventItem[] } = { transcript: text };
+      if (calendarEvents && calendarEvents.length > 0) {
+        body.events = calendarEvents;
+      }
+      const response = await fetch('/api/download-calendar/', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!response.ok) {
+        let detail = 'Failed to download .ics file';
+        try {
+          const errBody = await response.json();
+          if (errBody.detail) {
+            detail = typeof errBody.detail === 'string' ? errBody.detail : JSON.stringify(errBody.detail);
+          }
+        } catch {
+          /* ignore */
+        }
+        throw new Error(detail);
+      }
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'meeting_events.ics';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      window.URL.revokeObjectURL(url);
+    } catch (err) {
+      setCalendarModalError(err instanceof Error ? err.message : 'Failed to download .ics file');
+    } finally {
+      setIsDownloadingIcs(false);
+    }
+  };
+
   // Popup modal component
   const LanguagePopup = () => {
     if (!showLanguagePopup) return null;
@@ -558,6 +735,189 @@ function App() {
     );
   };
 
+  const JiraModal = () => {
+    if (!showJiraModal) return null;
+    return (
+      <div className="fixed inset-0 bg-black bg-opacity-50 z-[60] flex items-center justify-center p-4">
+        <div className="bg-white rounded-lg shadow-xl w-full max-w-lg max-h-[85vh] flex flex-col">
+          <div className="p-4 border-b flex justify-between items-center">
+            <h3 className="font-medium text-lg">Push Action Items to Jira</h3>
+            <button type="button" onClick={() => setShowJiraModal(false)} className="text-gray-400 hover:text-gray-600">
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+
+          <div className="p-4 overflow-y-auto flex-grow space-y-4">
+            {jiraModalError && <p className="text-sm text-red-600">{jiraModalError}</p>}
+
+            {/* Project selector */}
+            {!jiraTaskResults && (
+              <>
+                {isLoadingJiraProjects ? (
+                  <p className="text-sm text-indigo-600">Loading projects…</p>
+                ) : jiraProjects.length > 0 ? (
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Select Jira Project</label>
+                    <select
+                      value={selectedJiraProject}
+                      onChange={e => setSelectedJiraProject(e.target.value)}
+                      className="w-full p-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    >
+                      {jiraProjects.map(p => (
+                        <option key={p.key} value={p.key}>{p.name} ({p.key})</option>
+                      ))}
+                    </select>
+                  </div>
+                ) : !jiraModalError && (
+                  <p className="text-sm text-gray-500">No projects found.</p>
+                )}
+
+                {/* Preview action items */}
+                {actionItems.length > 0 && !isLoadingJiraProjects && (
+                  <div>
+                    <p className="text-sm font-medium text-gray-700 mb-2">Tasks to create ({actionItems.length})</p>
+                    <ul className="space-y-1 max-h-48 overflow-y-auto border rounded-lg divide-y divide-gray-100">
+                      {actionItems.map((item, idx) => (
+                        <li key={idx} className="px-3 py-2 text-sm text-gray-700">{item}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </>
+            )}
+
+            {/* Results */}
+            {jiraTaskResults && (
+              <div className="space-y-3">
+                {jiraTaskResults.created.length > 0 && (
+                  <div>
+                    <p className="text-sm font-medium text-green-700 mb-2">✅ {jiraTaskResults.created.length} task{jiraTaskResults.created.length > 1 ? 's' : ''} created</p>
+                    <ul className="space-y-1 border rounded-lg divide-y divide-gray-100">
+                      {jiraTaskResults.created.map((issue, idx) => (
+                        <li key={idx} className="px-3 py-2 text-sm flex items-center justify-between gap-2">
+                          <span className="text-gray-700 truncate">{issue.summary}</span>
+                          <a href={issue.url} target="_blank" rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-xs font-medium text-indigo-600 hover:text-indigo-800 shrink-0">
+                            {issue.key} <ExternalLink className="w-3 h-3" />
+                          </a>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+                {jiraTaskResults.failed.length > 0 && (
+                  <div>
+                    <p className="text-sm font-medium text-red-600 mb-2">❌ {jiraTaskResults.failed.length} failed</p>
+                    <ul className="space-y-1 border rounded-lg divide-y divide-gray-100">
+                      {jiraTaskResults.failed.map((f, idx) => (
+                        <li key={idx} className="px-3 py-2 text-sm text-red-600">{f.summary} — {f.error}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          <div className="p-4 border-t flex gap-2 justify-end">
+            <button type="button" onClick={() => setShowJiraModal(false)}
+              className="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">
+              {jiraTaskResults ? 'Close' : 'Cancel'}
+            </button>
+            {!jiraTaskResults && (
+              <button type="button" onClick={pushActionItemsToJira}
+                disabled={isCreatingJiraTasks || isLoadingJiraProjects || !selectedJiraProject || actionItems.length === 0}
+                className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:bg-indigo-300 flex items-center gap-2">
+                <ClipboardList className="w-4 h-4" />
+                {isCreatingJiraTasks ? 'Creating tasks…' : 'Create Tasks'}
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  const CalendarPopup = () => {
+    if (!showCalendarModal) return null;
+    return (
+      <div className="fixed inset-0 bg-black bg-opacity-50 z-[60] flex items-center justify-center p-4">
+        <div className="bg-white rounded-lg shadow-xl w-full max-w-lg max-h-[85vh] flex flex-col">
+          <div className="p-4 border-b flex justify-between items-center">
+            <h3 className="font-medium text-lg">Add to calendar</h3>
+            <button
+              type="button"
+              onClick={() => setShowCalendarModal(false)}
+              className="text-gray-400 hover:text-gray-600"
+              aria-label="Close"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+          <div className="p-4 overflow-y-auto flex-grow space-y-4">
+            <p className="text-sm text-gray-600">
+              We extract dates and times from your transcript. Download an <span className="font-medium">.ics</span> file for Apple
+              Calendar, Outlook desktop, or other apps—or open a single event in Google Calendar or Outlook on the web.
+            </p>
+            {isCalendarLoading && <p className="text-sm text-indigo-600">Extracting events from transcript…</p>}
+            {calendarModalError && <p className="text-sm text-red-600">{calendarModalError}</p>}
+            {!isCalendarLoading && calendarEvents && calendarEvents.length > 0 && (
+              <ul className="space-y-3 border rounded-lg divide-y divide-gray-100">
+                {calendarEvents.map((ev, idx) => (
+                  <li key={idx} className="p-3 text-sm">
+                    <p className="font-medium text-gray-900">{ev.title || 'Event'}</p>
+                    <p className="text-gray-600">
+                      {ev.date} · {ev.start_time}–{ev.end_time}
+                    </p>
+                    <div className="flex flex-wrap gap-2 mt-2">
+                      <a
+                        href={buildGoogleCalendarUrl(ev)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-blue-50 text-blue-700 hover:bg-blue-100"
+                      >
+                        Google Calendar <ExternalLink className="w-3 h-3" />
+                      </a>
+                      <a
+                        href={buildOutlookWebUrl(ev)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-sky-50 text-sky-800 hover:bg-sky-100"
+                      >
+                        Outlook (web) <ExternalLink className="w-3 h-3" />
+                      </a>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {!isCalendarLoading && calendarEvents && calendarEvents.length === 0 && !calendarModalError && (
+              <p className="text-sm text-gray-500">No events detected. You can still download a default follow-up entry as .ics.</p>
+            )}
+          </div>
+          <div className="p-4 border-t flex flex-col sm:flex-row gap-2 justify-end">
+            <button
+              type="button"
+              onClick={() => setShowCalendarModal(false)}
+              className="px-4 py-2 border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50"
+            >
+              Close
+            </button>
+            <button
+              type="button"
+              onClick={downloadCalendarIcs}
+              disabled={isDownloadingIcs || isCalendarLoading}
+              className="px-4 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:bg-indigo-300 flex items-center justify-center gap-2"
+            >
+              <Download className="w-4 h-4" />
+              {isDownloadingIcs ? 'Preparing…' : 'Download .ics file'}
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
   if (showAnalysis) {
     return (
       <div className="min-h-screen bg-gray-50 p-6 overflow-hidden">
@@ -580,7 +940,17 @@ function App() {
             <div className="bg-white rounded-lg shadow-sm p-4 flex-grow overflow-auto">
               <div className="flex items-center justify-between mb-3">
                 <h3 className="font-medium">Actions to Take</h3>
-                {isLoadingActionItems && <p className="text-sm text-purple-500">Loading...</p>}
+                <div className="flex items-center gap-2">
+                  {isLoadingActionItems && <p className="text-sm text-purple-500">Loading...</p>}
+                  {!isLoadingActionItems && actionItems.length > 0 && (
+                    <button
+                      onClick={openJiraModal}
+                      className="inline-flex items-center gap-1 text-xs px-2 py-1 rounded bg-indigo-50 text-indigo-700 hover:bg-indigo-100 font-medium"
+                    >
+                      <ClipboardList className="w-3 h-3" /> Push to Jira
+                    </button>
+                  )}
+                </div>
               </div>
               <div className="pr-2">
                 {actionItems.length > 0 ? (
@@ -701,8 +1071,9 @@ function App() {
                 </button>
                 
                 <button
-                  onClick={() => {}}
-                  disabled={!originalTranscript}
+                  type="button"
+                  onClick={openCalendarModal}
+                  disabled={!(originalTranscript || transcript).trim()}
                   className="bg-purple-600 hover:bg-purple-700 text-white px-3 py-2 rounded-lg flex items-center justify-center space-x-2 disabled:bg-purple-300 text-sm"
                 >
                   <Calendar className="w-4 h-4" />
@@ -791,6 +1162,8 @@ function App() {
         )}
 
         <LanguagePopup />
+        <CalendarPopup />
+        <JiraModal />
       </div>
     );
   }
